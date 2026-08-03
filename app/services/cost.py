@@ -19,6 +19,12 @@ class UnknownModelError(Exception):
     pass
 
 
+def register_free(model: str) -> None:
+    """Register a model as zero-cost (local models: Ollama, etc.). Keeps compute() fail-closed
+    for genuinely unknown paid models while letting local runs through."""
+    RATES.setdefault(model, (0.0, 0.0))
+
+
 def compute(model: str, input_tokens: int, output_tokens: int) -> float:
     if model not in RATES:
         raise UnknownModelError(model)  # fail closed: no silent $0 fallback

@@ -72,6 +72,23 @@ class PlanParseError(Exception):
     pass
 
 
+def extract_json_object(text: str) -> str:
+    """Pull the first balanced {...} object out of a model response — local models often wrap JSON
+    in prose or ```json fences. Brace-matched, not regex, so nested objects survive."""
+    start = text.find("{")
+    if start == -1:
+        return text
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return text[start:]
+
+
 def validate_plan(data: object) -> list[dict]:
     """Validate a model-produced plan against the schema. Pure — no LLM. Fails closed on any
     malformed structure so a bad decomposition never reaches the task materializer."""
@@ -195,9 +212,69 @@ class AnthropicProvider:
         raise PlanParseError(f"plan invalid after {self.max_plan_retries + 1} attempts: {last_err}")  # fail closed
 
 
+class OllamaProvider:
+    """Local models via Ollama's OpenAI-compatible endpoint. No key, no cost. Text-only (workers
+    produce artifacts as text); JSON calls (plan/critic) are extracted + validated with retry."""
+
+    def __init__(self, model: str, base_url: str, timeout: float = 300.0, max_plan_retries: int = 2):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.max_plan_retries = max_plan_retries
+
+    def _chat(self, system: str, messages: list[dict], max_tokens: int, json_mode: bool = False):
+        import httpx
+
+        msgs = ([{"role": "system", "content": system}] if system else [])
+        for m in messages:
+            role = m["role"] if m["role"] in ("user", "assistant", "system") else "user"  # tool->user
+            msgs.append({"role": role, "content": str(m["content"])})
+        payload = {"model": self.model, "messages": msgs, "stream": False, "max_tokens": max_tokens}
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        r = httpx.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout)
+        r.raise_for_status()
+        data = r.json()
+        content = data["choices"][0]["message"]["content"] or ""
+        usage = data.get("usage", {})
+        return content, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+
+    def complete(self, *, system: str, messages: list[dict], tools: list[dict], max_tokens: int) -> Completion:
+        content, inp, out = self._chat(system, messages, max_tokens)
+        return Completion(text=content, tool_calls=[], input_tokens=inp, output_tokens=out, stop_reason="end")
+
+    def plan(self, *, goal: str, departments: list[str], max_tokens: int) -> PlanResult:
+        import json
+
+        prompt = (
+            f"Decompose this goal into a task DAG. Goal: {goal}\n"
+            f"Available departments: {', '.join(departments)}.\n"
+            "Return ONLY a JSON object with a 'tasks' array. Each task: temp_id, goal, "
+            "acceptance_criteria, department (from the list), est_effort_hours (number), "
+            "depends_on (array of earlier temp_ids). No prose."
+        )
+        messages = [{"role": "user", "content": prompt}]
+        last_err: Exception | None = None
+        for _ in range(self.max_plan_retries + 1):
+            content, inp, out = self._chat("You output only JSON.", messages, max_tokens, json_mode=True)
+            try:
+                tasks = validate_plan(json.loads(extract_json_object(content)))
+                return PlanResult(tasks=tasks, input_tokens=inp, output_tokens=out)
+            except (json.JSONDecodeError, PlanParseError) as e:
+                last_err = e
+                messages += [{"role": "assistant", "content": content},
+                             {"role": "user", "content": f"That was invalid ({e}). Return ONLY the JSON object."}]
+        raise PlanParseError(f"plan invalid after {self.max_plan_retries + 1} attempts: {last_err}")
+
+
 def build_provider(provider: str, model: str, api_key: str | None):
     if provider == "echo":
         return EchoProvider()
+    if provider == "ollama":
+        from app.config import settings
+        from app.services import cost
+        cost.register_free(model)  # local models are free; keeps cost.compute fail-closed for paid ones
+        return OllamaProvider(model=model, base_url=settings.ollama_base_url)
     if provider == "anthropic":
         if not api_key:
             raise RuntimeError("anthropic provider requires ANTHROPIC_API_KEY")  # fail closed

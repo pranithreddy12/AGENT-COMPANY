@@ -18,6 +18,13 @@ def use_anthropic(db: Session, org_id: str, model: str = "claude-sonnet-5") -> N
     db.commit()
 
 
+def use_ollama(db: Session, org_id: str, model: str = "qwen2.5:7b") -> None:
+    """Point every agent at a local Ollama model. No key, no cost — real intelligence, run locally."""
+    for prof in db.scalars(select(AgentProfile).where(AgentProfile.org_id == org_id)):
+        prof.provider, prof.model = "ollama", model
+    db.commit()
+
+
 def lead_decomposition_eval(db: Session, org_id: str, goal: str = "Launch a new client onboarding service") -> dict:
     """Does the Lead turn a novel goal into a sane, acyclic, multi-step DAG?"""
     project, tasks = planning.draft_project(db, org_id, goal)
@@ -66,5 +73,11 @@ def critic_eval(db: Session, org_id: str) -> dict:
 
 
 def run_all(db: Session, org_id: str) -> dict:
-    results = [lead_decomposition_eval(db, org_id), sop_behavior_eval(db, org_id), critic_eval(db, org_id)]
+    results = []
+    for fn in (lead_decomposition_eval, sop_behavior_eval, critic_eval):
+        try:
+            results.append(fn(db, org_id))
+        except Exception as e:  # a real model failing one eval must not sink the others
+            db.rollback()
+            results.append({"name": fn.__name__.replace("_eval", ""), "passed": False, "error": str(e)[:200]})
     return {"passed": sum(r["passed"] for r in results), "total": len(results), "results": results}

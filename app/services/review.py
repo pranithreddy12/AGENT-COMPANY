@@ -23,8 +23,9 @@ _CRITIC_SYSTEM = (
 def parse_critic_verdict(text: str) -> Verdict:
     """Parse a model's critic response. Pure — no LLM. Fails closed (revise) on unparseable output
     so a malformed judge response never silently passes an artifact."""
+    from app.services.llm import extract_json_object
     try:
-        data = json.loads(text)
+        data = json.loads(extract_json_object(text))
         passed = bool(data["passed"])
         reasons = [str(r) for r in data.get("reasons", [])]
     except (json.JSONDecodeError, KeyError, TypeError):

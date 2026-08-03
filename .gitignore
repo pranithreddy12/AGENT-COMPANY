@@ -5,3 +5,7 @@ __pycache__/
 .env
 .venv/
 venv/
+
+# local eval db
+eval_ollama.db
+eval_live.db
