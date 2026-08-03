@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Actor, AgentProfile, AgentRun, Artifact, Department, MemoryRecord, Playbook, Project, Task
+from app.models import Actor, AgentProfile, AgentRun, Artifact, Department, MemoryRecord, Playbook, Project, Task, Thread
 from app.services import cost, communication, events, playbooks, review, runs, scheduling
 from app.services.llm import build_provider
 
@@ -237,6 +237,26 @@ def _remember(db: Session, project: Project, task: Task, artifact: Artifact, dep
     db.flush()
 
 
+def _status_thread(db: Session, project: Project) -> Thread:
+    t = db.scalars(select(Thread).where(Thread.project_id == project.id, Thread.thread_type == "status")).first()
+    if t is None:
+        t = communication.create_thread(db, project.org_id, "status", subject=f"Team log: {project.goal[:40]}",
+                                         project_id=project.id, message_budget=10000)
+    return t
+
+
+def _announce(db: Session, project: Project, task: Task, art: Artifact, tasks: dict, depts: dict) -> None:
+    """First-person, task-based communication: the agent tells the team it finished, and who's next."""
+    actor = db.get(Actor, task.assignee_actor_id)
+    who = actor.name if actor and actor.name else "An agent"
+    gist = " ".join((art.content or "").split())[:110]
+    downstream = sorted({depts[tasks[o].department_id].name for o in tasks
+                         if task.id in tasks[o].depends_on and tasks[o].department_id
+                         and tasks[o].department_id != task.department_id and tasks[o].department_id in depts})
+    msg = f"{who}: finished '{task.goal}'. {gist}" + (f" → handing to {', '.join(downstream)}." if downstream else "")
+    communication.post_message(db, _status_thread(db, project), task.assignee_actor_id, msg)
+
+
 def rerun_task(db: Session, project: Project, task: Task) -> Artifact:
     """Re-execute a single task (e.g. after a Playbook amendment). Produces a fresh Artifact."""
     critic = _critic_actor(db, project.org_id)
@@ -280,7 +300,8 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
         art = _run_and_review(db, project, t, critic, context=context)
         artifacts_by_task[t.id] = art
         if not art.needs_human and art.content:
-            _remember(db, project, t, art, depts)  # Archivist: share it with the rest of the team
+            _remember(db, project, t, art, depts)      # Archivist: share it in project memory
+            _announce(db, project, t, art, tasks, depts)  # agent tells the team, task-based comms
 
         # Legal veto: a Legal task blocks any already-produced artifact with prohibited content.
         if depts.get(t.department_id) and depts[t.department_id].name == "Legal":

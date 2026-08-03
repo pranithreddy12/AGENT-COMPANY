@@ -217,12 +217,14 @@ V.projects = async () => {
 V.project = async (id) => {
   setTitle('Project','delivery detail');
   const el = document.getElementById('view'); el.innerHTML = '<div class="faint">Loading…</div>';
-  const [p, arts, hos, mem] = await Promise.all([
+  const [p, arts, hos, mem, threads] = await Promise.all([
     api('GET','/projects/'+id),
     api('GET','/projects/'+id+'/artifacts').catch(()=>[]),
     api('GET','/projects/'+id+'/handoffs').catch(()=>[]),
     api('GET','/projects/'+id+'/memory').catch(()=>[]),
+    api('GET','/projects/'+id+'/threads').catch(()=>[]),
   ]);
+  const chatter = (threads.find(t=>t.thread_type==='status')||{}).messages||[];
   el.innerHTML='';
   el.append($(`<div class="back" onclick="go('projects')">← Projects</div>`));
   const acts = [];
@@ -246,6 +248,12 @@ V.project = async (id) => {
   el.append($(`<div class="panel"><h2>Tasks (${p.tasks.length})</h2>
     <table><thead><tr><th>Dept</th><th>Task</th><th>Status</th><th>Effort</th><th>Slack</th><th>Deps</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`));
+
+  // team communication — first-person, task-based status the agents posted as they worked
+  el.append($(`<div class="panel"><h2>Team communication (${chatter.length})</h2>
+    ${chatter.length?chatter.map(m=>`<div class="row" style="padding:9px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--accent)">💬</span><span>${esc(m.content)}</span></div>`).join('')
+      :'<div class="empty">Agents post here as they finish tasks — execute the project to see them talk.</div>'}</div>`));
 
   // artifacts
   el.append($(`<div class="panel"><h2>Deliverables (${arts.length})</h2>${arts.length?arts.map(a=>`
@@ -330,8 +338,19 @@ V.agents = async () => {
         ${scTile('Escalation', pct(a.scorecard.escalation_rate))}
         ${scTile('Runs', a.scorecard.runs)}
         ${scTile('Cost/task', '$'+a.scorecard.cost_per_task)}
-      </div></div>`).join('')}</div>`));
+      </div>
+      <div class="row" style="margin-top:11px"><input id="q_${a.id}" placeholder="Ask ${esc(a.name)} for a status update or anything…" style="flex:1"><button class="btn btn-sm" onclick="askAgent('${a.id}')">Ask</button></div>
+      <div class="faint" id="ans_${a.id}" style="margin-top:9px;white-space:pre-wrap;line-height:1.5"></div>
+      </div>`).join('')}</div>`));
 };
+
+async function askAgent(id){
+  const q=(document.getElementById('q_'+id)||{}).value||''; const out=document.getElementById('ans_'+id);
+  if(!q.trim()){return}
+  out.textContent='…thinking (local model, ~30s)…';
+  try{ const r=await api('POST','/agents/'+id+'/ask',{question:q}); out.textContent='💬 '+r.answer; }
+  catch(e){ out.textContent='Error: '+(e.detail||e.status); }
+}
 
 V.activity = async () => {
   setTitle('Activity','agent runs, newest first');
@@ -339,7 +358,7 @@ V.activity = async () => {
   const el=document.getElementById('view'); el.innerHTML='';
   el.append($(`<div class="panel"><h2>Recent agent runs (${runs.length})</h2>
     ${runs.length?`<table><thead><tr><th>Agent</th><th>Did</th><th>Status</th><th>Turns</th><th>Cost</th><th>When</th></tr></thead>
-      <tbody>${runs.map(r=>`<tr><td>${badge(r.role)} <span class="muted">${esc(r.department)}</span></td>
+      <tbody>${runs.map(r=>`<tr><td><b>${esc(r.agent||r.role)}</b> <span class="muted">· ${esc(r.department)}</span></td>
         <td>${esc(r.trigger)||'<span class="faint">—</span>'}</td><td>${badge(r.status)}</td>
         <td class="muted">${r.turns}</td><td class="muted">$${r.cost_usd}</td>
         <td class="faint">${r.started_at?new Date(r.started_at).toLocaleTimeString():'—'}</td></tr>`).join('')}</tbody></table>`

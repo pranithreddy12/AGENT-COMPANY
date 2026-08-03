@@ -61,7 +61,7 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
     )
     db.add(lead_profile)
     db.flush()
-    lead = Actor(org_id=org.id, type="agent", role="lead", agent_profile_id=lead_profile.id)
+    lead = Actor(org_id=org.id, type="agent", role="lead", name="Cora Lead Agent", agent_profile_id=lead_profile.id)
     db.add(lead)
     db.flush()
 
@@ -73,7 +73,12 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
     db.add(worker_profile)
     db.flush()
 
-    # Six departments, each with a charter, a Playbook, and one (two for Development) worker agents.
+    # Each agent is an individual with a persona name ending in "Agent".
+    PERSONAS = {
+        "Planning": ["Piper Planning Agent"], "Sales": ["Sam Sales Agent"],
+        "Marketing": ["Mia Marketing Agent"], "Development": ["Devin Dev Agent", "Dana Dev Agent"],
+        "Legal": ["Lena Legal Agent"], "Client Management": ["Cleo Client Agent"],
+    }
     first_agent = None
     for name, charter in DEPARTMENTS.items():
         dept = Department(org_id=org.id, name=name, charter=charter)
@@ -83,9 +88,8 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
             org_id=org.id, department_id=dept.id, title=f"{name} SOP v1", version=1,
             markdown=f"# {name} Playbook\n\n{charter}\n\n- Produce artifacts that meet the task acceptance criteria.\n- Escalate to a human when uncertain.",
         ))
-        n = 2 if name == "Development" else 1
-        for _ in range(n):
-            a = Actor(org_id=org.id, type="agent", role="member",
+        for persona in PERSONAS[name]:
+            a = Actor(org_id=org.id, type="agent", role="member", name=persona,
                       agent_profile_id=worker_profile.id, department_id=dept.id)
             db.add(a)
             db.flush()
@@ -98,7 +102,7 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
     )
     db.add(critic_profile)
     db.flush()
-    db.add(Actor(org_id=org.id, type="agent", role="critic", agent_profile_id=critic_profile.id))
+    db.add(Actor(org_id=org.id, type="agent", role="critic", name="Quinn QA Agent", agent_profile_id=critic_profile.id))
     db.commit()
 
     # actor_id returned = first worker agent (handy for the Phase 0 trivial-run demo).

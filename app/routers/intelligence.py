@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 from app.auth import Principal, current_principal, require_role
 from app.db import get_db
 from app.models import Actor, AgentProfile, AgentRun, Department
-from app.schemas import ConfirmHireRequest, HireOut, HireRequest
-from app.services import intelligence
+from app.schemas import AskAgentRequest, ConfirmHireRequest, HireOut, HireRequest
+from app.services import intelligence, talk
 from app.tenancy import Tenant
 
 router = APIRouter(tags=["intelligence"])
@@ -21,7 +21,7 @@ def list_agents(db: Session = Depends(get_db), p: Principal = Depends(current_pr
     for a in db.scalars(select(Actor).where(Actor.org_id == p.org_id, Actor.type == "agent")):
         prof = db.get(AgentProfile, a.agent_profile_id) if a.agent_profile_id else None
         out.append({
-            "id": a.id, "name": prof.name if prof else "?", "role": a.role,
+            "id": a.id, "name": a.name or (prof.name if prof else "?"), "role": a.role,
             "department": depts.get(a.department_id) or ("—" if a.role != "lead" else "org-wide"),
             "provider": prof.provider if prof else "?", "model": prof.model if prof else "?",
             "autonomy": prof.autonomy_default if prof else "?", "status": a.status,
@@ -42,12 +42,23 @@ def activity(limit: int = 40, db: Session = Depends(get_db), p: Principal = Depe
     for r in runs:
         a = actors.get(r.actor_id)
         out.append({
-            "id": r.id, "role": a.role if a else "?",
+            "id": r.id, "agent": (a.name if a and a.name else (a.role if a else "?")), "role": a.role if a else "?",
             "department": (depts.get(a.department_id) if a and a.department_id else ("org-wide" if a and a.role == "lead" else "—")),
             "trigger": (r.trigger or "")[:70], "status": r.status, "turns": r.turns_used,
             "cost_usd": r.cost_usd, "started_at": r.started_at.isoformat() if r.started_at else None,
         })
     return out
+
+
+@router.post("/agents/{agent_id}/ask")
+def ask_agent(agent_id: str, body: AskAgentRequest, db: Session = Depends(get_db),
+              p: Principal = Depends(current_principal)) -> dict:
+    """Ask an agent anything — a status update, a question about its work, anything."""
+    actor = Tenant(db, p.org_id).get(Actor, agent_id)
+    if actor is None or actor.type != "agent":
+        raise HTTPException(status_code=404, detail="agent not found")
+    answer = talk.ask_agent(db, p.org_id, actor, body.question, body.project_id)
+    return {"agent": actor.name or actor.role, "answer": answer}
 
 
 @router.get("/scorecards")

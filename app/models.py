@@ -71,6 +71,7 @@ class Actor(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     type: Mapped[str] = mapped_column(String)  # agent|human
+    name: Mapped[str | None] = mapped_column(String, nullable=True)  # persona, e.g. "Sam Sales Agent"
     role: Mapped[str] = mapped_column(String, default="member")  # lead|head|member
     status: Mapped[str] = mapped_column(String, default="active")
     department_id: Mapped[str | None] = mapped_column(String, nullable=True)

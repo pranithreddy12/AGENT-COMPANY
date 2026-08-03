@@ -312,3 +312,8 @@ class HireOut(BaseModel):
 
 class ConfirmHireRequest(BaseModel):
     department_id: str | None = None
+
+
+class AskAgentRequest(BaseModel):
+    question: str
+    project_id: str | None = None
