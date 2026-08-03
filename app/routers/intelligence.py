@@ -1,15 +1,53 @@
-"""Phase 7: scorecards, hire-an-agent, retro, Playbook A/B."""
+"""Phase 7: scorecards, hire-an-agent, retro, Playbook A/B, + the agent roster & activity feed."""
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, current_principal, require_role
 from app.db import get_db
-from app.models import Actor, AgentProfile
+from app.models import Actor, AgentProfile, AgentRun, Department
 from app.schemas import ConfirmHireRequest, HireOut, HireRequest
 from app.services import intelligence
 from app.tenancy import Tenant
 
 router = APIRouter(tags=["intelligence"])
+
+
+@router.get("/agents")
+def list_agents(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> list[dict]:
+    """The workforce: every agent with its role, department, model, autonomy, and live scorecard."""
+    depts = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == p.org_id))}
+    out = []
+    for a in db.scalars(select(Actor).where(Actor.org_id == p.org_id, Actor.type == "agent")):
+        prof = db.get(AgentProfile, a.agent_profile_id) if a.agent_profile_id else None
+        out.append({
+            "id": a.id, "name": prof.name if prof else "?", "role": a.role,
+            "department": depts.get(a.department_id) or ("—" if a.role != "lead" else "org-wide"),
+            "provider": prof.provider if prof else "?", "model": prof.model if prof else "?",
+            "autonomy": prof.autonomy_default if prof else "?", "status": a.status,
+            "scorecard": intelligence.scorecard(db, p.org_id, a),
+        })
+    role_order = {"lead": 0, "member": 1, "critic": 2}
+    return sorted(out, key=lambda x: (role_order.get(x["role"], 3), x["department"]))
+
+
+@router.get("/activity")
+def activity(limit: int = 40, db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> list[dict]:
+    """Recent agent runs, newest first — what each agent actually did."""
+    depts = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == p.org_id))}
+    actors = {a.id: a for a in db.scalars(select(Actor).where(Actor.org_id == p.org_id))}
+    runs = db.scalars(select(AgentRun).where(AgentRun.org_id == p.org_id)
+                      .order_by(AgentRun.started_at.desc().nullslast()).limit(min(limit, 100)))
+    out = []
+    for r in runs:
+        a = actors.get(r.actor_id)
+        out.append({
+            "id": r.id, "role": a.role if a else "?",
+            "department": (depts.get(a.department_id) if a and a.department_id else ("org-wide" if a and a.role == "lead" else "—")),
+            "trigger": (r.trigger or "")[:70], "status": r.status, "turns": r.turns_used,
+            "cost_usd": r.cost_usd, "started_at": r.started_at.isoformat() if r.started_at else None,
+        })
+    return out
 
 
 @router.get("/scorecards")

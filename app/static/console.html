@@ -155,9 +155,13 @@ async function api(method, path, body){
 const NAV = [
   ['dashboard','Dashboard','M3 3h7v7H3zM14 3h7v4h-7zM14 10h7v11h-7zM3 14h7v7H3z'],
   ['projects','Projects','M3 4h18v4H3zM3 10h18v10H3z'],
+  ['agents','Agents','M9 11a3 3 0 100-6 3 3 0 000 6zM3 20v-1a4 4 0 014-4h4a4 4 0 014 4v1M16 11a3 3 0 10-1-6M21 20v-1a4 4 0 00-3-3.8'],
+  ['activity','Activity','M3 12h4l2.5 7 4-15L16 12h5'],
   ['leads','Leads / CRM','M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0z'],
   ['controls','Governance','M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z'],
 ];
+const pct = (x) => Math.round((x||0)*100)+'%';
+const scTile = (l,v) => `<div class="stat"><span class="bar"></span><div class="lbl">${l}</div><div class="val" style="font-size:19px">${v}</div></div>`;
 function drawNav(){
   document.getElementById('nav').innerHTML = NAV.map(([k,l,p])=>
     `<a data-k="${k}" onclick="go('${k}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="${p}"/></svg>${l}</a>`).join('');
@@ -301,6 +305,38 @@ V.controls = async () => {
     <p class="muted" style="margin:0 0 12px">Generate the long-lived secret LeadForge uses to post handoffs (shown once).</p>
     <div class="row"><button class="btn" onclick="genSecret()">Generate secret</button></div>
     <pre class="art" id="secret" style="display:none"></pre></div>`));
+};
+
+V.agents = async () => {
+  setTitle('Agents','the AI workforce');
+  const agents = await api('GET','/agents');
+  const el=document.getElementById('view'); el.innerHTML='';
+  el.append($(`<div class="panel"><h2>Workforce (${agents.length})</h2>
+    ${agents.map(a=>`<div class="art-card"><div class="ah">
+        <b>${esc(a.name)}</b> ${badge(a.role)} <span class="muted">${esc(a.department)}</span>
+        <span class="spacer"></span>
+        <span class="chip">${esc(a.provider)}:${esc(a.model)}</span><span class="chip">autonomy ${esc(a.autonomy)}</span></div>
+      <div class="grid cards" style="margin-top:11px">
+        ${scTile('Tasks done', a.scorecard.tasks_completed)}
+        ${scTile('First-pass', pct(a.scorecard.first_pass_rate))}
+        ${scTile('Rework', pct(a.scorecard.rework_rate))}
+        ${scTile('Escalation', pct(a.scorecard.escalation_rate))}
+        ${scTile('Runs', a.scorecard.runs)}
+        ${scTile('Cost/task', '$'+a.scorecard.cost_per_task)}
+      </div></div>`).join('')}</div>`));
+};
+
+V.activity = async () => {
+  setTitle('Activity','agent runs, newest first');
+  const runs = await api('GET','/activity');
+  const el=document.getElementById('view'); el.innerHTML='';
+  el.append($(`<div class="panel"><h2>Recent agent runs (${runs.length})</h2>
+    ${runs.length?`<table><thead><tr><th>Agent</th><th>Did</th><th>Status</th><th>Turns</th><th>Cost</th><th>When</th></tr></thead>
+      <tbody>${runs.map(r=>`<tr><td>${badge(r.role)} <span class="muted">${esc(r.department)}</span></td>
+        <td>${esc(r.trigger)||'<span class="faint">—</span>'}</td><td>${badge(r.status)}</td>
+        <td class="muted">${r.turns}</td><td class="muted">$${r.cost_usd}</td>
+        <td class="faint">${r.started_at?new Date(r.started_at).toLocaleTimeString():'—'}</td></tr>`).join('')}</tbody></table>`
+      :'<div class="empty">No agent runs yet. Approve &amp; execute a project to put the agents to work.</div>'}</div>`));
 };
 
 // ---------- shared renderers ----------
