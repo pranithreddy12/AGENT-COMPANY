@@ -329,6 +329,22 @@ class ChangeOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
+class MemoryRecord(Base):
+    """Shared, scoped knowledge. Agents write what they produced here and read it before working,
+    so the team builds on each other's output instead of guessing in isolation.
+    """
+    __tablename__ = "memory_records"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    scope: Mapped[str] = mapped_column(String, default="project")  # project|department|org|client
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
+    source_actor_id: Mapped[str | None] = mapped_column(ForeignKey("actors.id"), nullable=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
 class Scorecard(Base):
     __tablename__ = "scorecards"
 

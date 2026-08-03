@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import Principal, current_principal, require_role
 from app.db import get_db
-from app.models import Artifact, Department, HandoffPacket, Message, Project, Task, Thread
+from app.models import Artifact, Department, HandoffPacket, MemoryRecord, Message, Project, Task, Thread
 from app.schemas import (
     ArtifactOut, HandoffOut, MessageOut, ProjectCreate, ProjectOut, SlipRequest, ThreadOut, TaskOut,
 )
@@ -75,6 +75,15 @@ def execute(project_id: str, db: Session = Depends(get_db),
     project = _load(db, p, project_id)
     arts = planning.execute_project(db, project)
     return [_artifact_out(a) for a in arts]
+
+
+@router.get("/projects/{project_id}/memory")
+def project_memory(project_id: str, db: Session = Depends(get_db),
+                   p: Principal = Depends(current_principal)) -> list[dict]:
+    _load(db, p, project_id)
+    mem = db.scalars(select(MemoryRecord).where(MemoryRecord.project_id == project_id)
+                     .order_by(MemoryRecord.created_at))
+    return [{"scope": m.scope, "department_id": m.department_id, "content": m.content} for m in mem]
 
 
 @router.get("/projects/{project_id}/handoffs", response_model=list[HandoffOut])

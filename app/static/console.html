@@ -217,10 +217,11 @@ V.projects = async () => {
 V.project = async (id) => {
   setTitle('Project','delivery detail');
   const el = document.getElementById('view'); el.innerHTML = '<div class="faint">Loading…</div>';
-  const [p, arts, hos] = await Promise.all([
+  const [p, arts, hos, mem] = await Promise.all([
     api('GET','/projects/'+id),
     api('GET','/projects/'+id+'/artifacts').catch(()=>[]),
     api('GET','/projects/'+id+'/handoffs').catch(()=>[]),
+    api('GET','/projects/'+id+'/memory').catch(()=>[]),
   ]);
   el.innerHTML='';
   el.append($(`<div class="back" onclick="go('projects')">← Projects</div>`));
@@ -259,6 +260,12 @@ V.project = async (id) => {
     <div class="row" style="padding:8px 0;border-bottom:1px solid var(--border)">
       <span class="badge">${esc(dept(h.from_department_id))} → ${esc(dept(h.to_department_id))}</span>
       <span class="muted">${esc(h.context)}</span><span class="spacer"></span><span class="faint">${h.evidence.length} evidence</span></div>`).join(''):'<div class="empty">None.</div>'}</div>`));
+
+  // shared memory — what each agent wrote for the team to build on
+  el.append($(`<div class="panel"><h2>Shared project memory (${mem.length})</h2>
+    <p class="muted" style="margin:-6px 0 12px">Each agent reads this before working, and writes to it after — so the team builds on itself instead of starting blank.</p>
+    ${mem.length?mem.map(m=>`<div class="row" style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <span class="chip">${esc(dept(m.department_id))}</span><span class="muted">${esc(m.content)}</span></div>`).join(''):'<div class="empty">Empty until the project executes.</div>'}</div>`));
 };
 
 V.leads = async () => {

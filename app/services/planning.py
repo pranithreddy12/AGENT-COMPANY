@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Actor, AgentProfile, AgentRun, Artifact, Department, Playbook, Project, Task
+from app.models import Actor, AgentProfile, AgentRun, Artifact, Department, MemoryRecord, Playbook, Project, Task
 from app.services import cost, communication, events, playbooks, review, runs, scheduling
 from app.services.llm import build_provider
 
@@ -157,9 +157,12 @@ def _playbook_md(db: Session, org_id: str, dept_id: str | None) -> str:
     return pb.markdown if pb else ""
 
 
-def _run_and_review(db: Session, project: Project, task: Task, critic: Actor | None) -> Artifact:
+def _run_and_review(db: Session, project: Project, task: Task, critic: Actor | None, context: str = "") -> Artifact:
     """Produce an artifact, then run the Critic. Re-run on `revise`, capped at MAX_REVISE_CYCLES,
     then escalate to a human. This cap is the bounded-loop guarantee.
+
+    `context` is the shared team context (upstream deliverables + project memory) — the agent reads
+    it before working so its output builds on the team's, not a blank slate.
     """
     actor = db.get(Actor, task.assignee_actor_id)
     active_pb = playbooks.active(db, project.org_id, task.department_id) if task.department_id else None
@@ -169,10 +172,15 @@ def _run_and_review(db: Session, project: Project, task: Task, critic: Actor | N
                    playbook_version=active_pb.version if active_pb else None)
     db.add(art)
 
+    brief = task.goal
+    if context:
+        brief = ("Context from your team — build directly on this, be specific to it, do not use "
+                 "generic placeholders:\n" + context + "\n\n---\nYour task: " + task.goal)
+
     feedback = ""
     for _ in range(MAX_REVISE_CYCLES + 1):  # initial attempt + N revises
         # the active Playbook goes into the agent's system context (real in-context SOP loading)
-        run = runs.execute(db, runs.create_run(db, project.org_id, actor, task.goal + feedback),
+        run = runs.execute(db, runs.create_run(db, project.org_id, actor, brief + feedback),
                            extra_system=playbook)
         if run.status != "succeeded":
             # fail closed: a failed run never becomes a passing artifact — escalate to a human
@@ -203,10 +211,40 @@ def _run_and_review(db: Session, project: Project, task: Task, critic: Actor | N
     return art
 
 
+def _gather_context(db: Session, project: Project, task: Task, tasks: dict, artifacts_by_task: dict, depts: dict) -> str:
+    """The shared context an agent reads before working: the real deliverables of its upstream
+    dependencies + the accumulated project memory. This is how the team builds on itself."""
+    parts = []
+    for dep_id in task.depends_on:
+        dep, art = tasks.get(dep_id), artifacts_by_task.get(dep_id)
+        if dep and art and art.content:
+            name = depts[dep.department_id].name if dep.department_id in depts else "?"
+            parts.append(f"[{name}] {dep.goal}:\n{art.content.strip()[:900]}")
+    mem = list(db.scalars(select(MemoryRecord).where(
+        MemoryRecord.project_id == project.id, MemoryRecord.scope == "project").order_by(MemoryRecord.created_at)))
+    if mem:
+        parts.append("Shared project knowledge so far:\n- " + "\n- ".join(m.content for m in mem[-8:]))
+    return "\n\n".join(parts)
+
+
+def _remember(db: Session, project: Project, task: Task, artifact: Artifact, depts: dict) -> None:
+    """Archivist: write what an agent produced into shared project memory for the rest of the team."""
+    name = depts[task.department_id].name if task.department_id in depts else "?"
+    summary = " ".join((artifact.content or "").split())[:220]
+    db.add(MemoryRecord(org_id=project.org_id, scope="project", project_id=project.id,
+                        department_id=task.department_id, source_actor_id=artifact.produced_by_actor_id,
+                        content=f"{name} completed '{task.goal}': {summary}"))
+    db.flush()
+
+
 def rerun_task(db: Session, project: Project, task: Task) -> Artifact:
     """Re-execute a single task (e.g. after a Playbook amendment). Produces a fresh Artifact."""
     critic = _critic_actor(db, project.org_id)
-    art = _run_and_review(db, project, task, critic)
+    tasks = {t.id: t for t in _tasks(db, project)}
+    depts = {d.id: d for d in db.scalars(select(Department).where(Department.org_id == project.org_id))}
+    arts = {a.task_id: a for a in db.scalars(select(Artifact).where(Artifact.task_id.in_(list(tasks))))} if tasks else {}
+    context = _gather_context(db, project, task, tasks, arts, depts)
+    art = _run_and_review(db, project, task, critic, context=context)
     task.status = "done" if not art.needs_human else "blocked"
     db.commit()
     return art
@@ -237,8 +275,12 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
                     sender_actor_id=dep.assignee_actor_id,
                 )
 
-        art = _run_and_review(db, project, t, critic)
+        # the agent reads the team's shared context (upstream deliverables + project memory) first
+        context = _gather_context(db, project, t, tasks, artifacts_by_task, depts)
+        art = _run_and_review(db, project, t, critic, context=context)
         artifacts_by_task[t.id] = art
+        if not art.needs_human and art.content:
+            _remember(db, project, t, art, depts)  # Archivist: share it with the rest of the team
 
         # Legal veto: a Legal task blocks any already-produced artifact with prohibited content.
         if depts.get(t.department_id) and depts[t.department_id].name == "Legal":
