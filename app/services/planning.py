@@ -245,16 +245,48 @@ def _status_thread(db: Session, project: Project) -> Thread:
     return t
 
 
-def _announce(db: Session, project: Project, task: Task, art: Artifact, tasks: dict, depts: dict) -> None:
-    """First-person, task-based communication: the agent tells the team it finished, and who's next."""
-    actor = db.get(Actor, task.assignee_actor_id)
-    who = actor.name if actor and actor.name else "An agent"
-    gist = " ".join((art.content or "").split())[:110]
-    downstream = sorted({depts[tasks[o].department_id].name for o in tasks
-                         if task.id in tasks[o].depends_on and tasks[o].department_id
-                         and tasks[o].department_id != task.department_id and tasks[o].department_id in depts})
-    msg = f"{who}: finished '{task.goal}'. {gist}" + (f" → handing to {', '.join(downstream)}." if downstream else "")
-    communication.post_message(db, _status_thread(db, project), task.assignee_actor_id, msg)
+def _post(db: Session, project: Project, actor_id: str | None, msg: str) -> None:
+    communication.post_message(db, _status_thread(db, project), actor_id, msg)
+
+
+def _name(actors: dict, task: Task) -> str | None:
+    a = actors.get(task.assignee_actor_id)
+    return a.name if a and a.name else None
+
+
+def _upstream_names(task: Task, tasks: dict, actors: dict) -> list[str]:
+    return [n for d in task.depends_on if d in tasks and (n := _name(actors, tasks[d]))]
+
+
+def _downstream_names(task: Task, tasks: dict, actors: dict) -> list[str]:
+    return sorted({n for o in tasks if task.id in tasks[o].depends_on and (n := _name(actors, tasks[o]))})
+
+
+def _kickoff(db: Session, project: Project, tasks: dict, order: list, actors: dict) -> None:
+    lead = db.scalars(select(Actor).where(Actor.org_id == project.org_id, Actor.role == "lead")).first()
+    if not lead:
+        return
+    first = actors.get(tasks[order[0]].assignee_actor_id).name if order else None
+    _post(db, project, lead.id,
+          f"{lead.name}: Plan set for “{project.goal}” — {len(tasks)} tasks across the team."
+          + (f" {first}, you're up first." if first else ""))
+
+
+def _announce_start(db: Session, project: Project, task: Task, tasks: dict, actors: dict) -> None:
+    who = _name(actors, task) or "An agent"
+    up = _upstream_names(task, tasks, actors)
+    _post(db, project, task.assignee_actor_id,
+          f"{who}: thanks {', '.join(up)} — picking up “{task.goal}” from here." if up
+          else f"{who}: starting “{task.goal}”.")
+
+
+def _announce_done(db: Session, project: Project, task: Task, art: Artifact, tasks: dict, actors: dict) -> None:
+    who = _name(actors, task) or "An agent"
+    gist = " ".join((art.content or "").split())[:100]
+    down = _downstream_names(task, tasks, actors)
+    _post(db, project, task.assignee_actor_id,
+          f"{who}: done with “{task.goal}”. {gist}"
+          + (f" Over to you, {', '.join(down)}." if down else " That wraps the project."))
 
 
 def rerun_task(db: Session, project: Project, task: Task) -> Artifact:
@@ -274,13 +306,16 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
     tasks = {t.id: t for t in _tasks(db, project)}
     order = scheduling.topo_order(_nodes(list(tasks.values())))
     depts = {d.id: d for d in db.scalars(select(Department).where(Department.org_id == project.org_id))}
+    actors = {a.id: a for a in db.scalars(select(Actor).where(Actor.org_id == project.org_id))}
     critic = _critic_actor(db, project.org_id)
     artifacts_by_task: dict[str, Artifact] = {}
+    _kickoff(db, project, tasks, order, actors)  # the Lead opens the team chat
 
     for tid in order:
         t = tasks[tid]
         if t.assignee_actor_id is None:
             continue
+        _announce_start(db, project, t, tasks, actors)  # agent acknowledges upstream, in the chat
 
         # structured handoff for every cross-department dependency edge
         for dep_id in t.depends_on:
@@ -300,8 +335,8 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
         art = _run_and_review(db, project, t, critic, context=context)
         artifacts_by_task[t.id] = art
         if not art.needs_human and art.content:
-            _remember(db, project, t, art, depts)      # Archivist: share it in project memory
-            _announce(db, project, t, art, tasks, depts)  # agent tells the team, task-based comms
+            _remember(db, project, t, art, depts)               # Archivist: share it in project memory
+            _announce_done(db, project, t, art, tasks, actors)  # agent reports back in the chat, hands off
 
         # Legal veto: a Legal task blocks any already-produced artifact with prohibited content.
         if depts.get(t.department_id) and depts[t.department_id].name == "Legal":

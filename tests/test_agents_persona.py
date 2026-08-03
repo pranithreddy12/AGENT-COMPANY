@@ -36,7 +36,9 @@ def test_agents_post_task_based_communication(db):
 
     st = db.scalars(select(Thread).where(Thread.project_id == project.id, Thread.thread_type == "status")).first()
     assert st is not None
-    msgs = list(db.scalars(select(Message).where(Message.thread_id == st.id)))
-    assert len(msgs) >= 5
-    assert any("finished" in m.content and "Agent" in m.content for m in msgs)  # first-person, named
-    assert any("handing to" in m.content for m in msgs)  # task-based: says who's next
+    msgs = [m.content for m in db.scalars(select(Message).where(Message.thread_id == st.id))]
+    assert len(msgs) >= 8  # Lead kickoff + a start + done per task = a real conversation
+    assert any("Plan set" in m for m in msgs)                    # the Lead opens the chat
+    assert any("picking up" in m or "starting" in m for m in msgs)  # agent acknowledges before working
+    assert any("done with" in m and "Agent" in m for m in msgs)     # first-person, named, reports back
+    assert any("Over to you" in m for m in msgs)                    # hands to the next agent by name

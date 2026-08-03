@@ -92,6 +92,12 @@
   .kv{display:flex;gap:22px;flex-wrap:wrap;color:var(--muted);font-size:13px}
   .kv b{color:var(--text);font-weight:600}
 
+  .chatmsg{display:flex;gap:10px;margin:0 0 13px;align-items:flex-start}
+  .avatar{width:30px;height:30px;border-radius:50%;flex:0 0 30px;display:grid;place-items:center;font-weight:700;font-size:13px;background:linear-gradient(135deg,var(--accent),var(--purple));color:#fff}
+  .bubble{background:var(--surface2);border:1px solid var(--border);border-radius:4px 12px 12px 12px;padding:9px 13px;max-width:82%}
+  .bubble .who{font-size:12.5px;font-weight:650;color:#cfe0ff}
+  .bubble .txt{margin-top:2px;color:var(--text)}
+
   #toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:9px;z-index:50}
   .toast{background:var(--surface2);border:1px solid var(--border2);border-left:3px solid var(--accent);border-radius:9px;padding:11px 15px;min-width:230px;box-shadow:0 8px 30px rgba(0,0,0,.4);animation:in .2s}
   .toast.err{border-left-color:var(--red)} .toast.ok{border-left-color:var(--green)}
@@ -249,11 +255,14 @@ V.project = async (id) => {
     <table><thead><tr><th>Dept</th><th>Task</th><th>Status</th><th>Effort</th><th>Slack</th><th>Deps</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`));
 
-  // team communication — first-person, task-based status the agents posted as they worked
-  el.append($(`<div class="panel"><h2>Team communication (${chatter.length})</h2>
-    ${chatter.length?chatter.map(m=>`<div class="row" style="padding:9px 0;border-bottom:1px solid var(--border)">
-        <span style="color:var(--accent)">💬</span><span>${esc(m.content)}</span></div>`).join('')
-      :'<div class="empty">Agents post here as they finish tasks — execute the project to see them talk.</div>'}</div>`));
+  // team chat — the agents talking through the work, task by task
+  el.append($(`<div class="panel"><h2>Team chat (${chatter.length})</h2>
+    ${chatter.length?chatter.map(m=>{
+        const i=m.content.indexOf(':'); const who=i>0?m.content.slice(0,i):'Agent'; const txt=i>0?m.content.slice(i+1).trim():m.content;
+        return `<div class="chatmsg"><div class="avatar">${esc(who.trim()[0]||'A')}</div>
+          <div class="bubble"><div class="who">${esc(who)}</div><div class="txt">${esc(txt)}</div></div></div>`;
+      }).join('')
+      :'<div class="empty">The team talks here as they work — execute the project to watch them.</div>'}</div>`));
 
   // artifacts
   el.append($(`<div class="panel"><h2>Deliverables (${arts.length})</h2>${arts.length?arts.map(a=>`
