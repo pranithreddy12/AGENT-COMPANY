@@ -181,7 +181,11 @@ def _run_and_review(db: Session, project: Project, task: Task, critic: Actor | N
             return art
         content = (run.result or {}).get("text", "")
         art.content, art.version = content, art.version + 1
-        verdict = _review(db, project.org_id, critic, content, task.acceptance_criteria, playbook)
+        try:
+            verdict = _review(db, project.org_id, critic, content, task.acceptance_criteria, playbook)
+        except Exception as e:  # a Critic API failure escalates to a human — never crashes execution
+            art.needs_human, art.critic_reasons = True, [f"critic error: {e}"]
+            return art
         art.reviewed_by_actor_id = critic.id if critic else None
         if verdict.passed:
             art.status, art.critic_reasons = "reviewed", []
@@ -244,6 +248,11 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
                     other.blocked, other.block_reason = True, "; ".join(v.reasons)
 
         t.status = "done" if not art.needs_human else "blocked"
+
+    # a Legal-blocked artifact keeps its task (and the project) out of "done" — the veto actually blocks
+    for tid, art in artifacts_by_task.items():
+        if art.blocked:
+            tasks[tid].status = "blocked"
 
     project.status = "done" if all(x.status == "done" for x in tasks.values()) else "active"
     project.health = "on_track" if project.status == "done" else project.health

@@ -35,12 +35,17 @@ def add_team_member(body: TeamMemberCreate, db: Session = Depends(get_db),
 @router.post("/tasks/{task_id}/assign")
 def assign(task_id: str, body: AssignRequest, db: Session = Depends(get_db),
            p: Principal = Depends(require_role("ceo", "dept_head"))) -> dict:
-    task = Tenant(db, p.org_id).get(Task, task_id)
+    tenant = Tenant(db, p.org_id)
+    task = tenant.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
     if body.assignee_actor_id is not None:
+        if tenant.get(Actor, body.assignee_actor_id) is None:  # no cross-tenant / dangling refs
+            raise HTTPException(status_code=404, detail="assignee not found")
         task.assignee_actor_id = body.assignee_actor_id
     if body.reviewer_actor_id is not None:
+        if tenant.get(Actor, body.reviewer_actor_id) is None:
+            raise HTTPException(status_code=404, detail="reviewer not found")
         task.reviewer_actor_id = body.reviewer_actor_id
     db.commit()
     return {"task_id": task_id, "assignee": task.assignee_actor_id, "reviewer": task.reviewer_actor_id}
