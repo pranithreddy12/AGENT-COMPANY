@@ -247,6 +247,7 @@ def _status_thread(db: Session, project: Project) -> Thread:
 
 def _post(db: Session, project: Project, actor_id: str | None, msg: str) -> None:
     communication.post_message(db, _status_thread(db, project), actor_id, msg)
+    db.commit()  # commit immediately so the chat streams in live (readers see each message at once)
 
 
 def _name(actors: dict, task: Task) -> str | None:
