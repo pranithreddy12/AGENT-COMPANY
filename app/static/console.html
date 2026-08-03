@@ -234,9 +234,11 @@ V.project = async (id) => {
   el.innerHTML='';
   el.append($(`<div class="back" onclick="go('projects')">← Projects</div>`));
   const acts = [];
-  if(p.status==='planning') acts.push(`<button class="btn btn-primary btn-sm" onclick="act('${id}','approve')">Approve &amp; schedule</button>`);
-  if(p.status==='active')   acts.push(`<button class="btn btn-primary btn-sm" onclick="act('${id}','execute')">Execute</button>`);
+  if(p.status==='planning'){ acts.push(`<button class="btn btn-primary btn-sm" onclick="runProject('${id}')">▶ Run it</button>`);
+                             acts.push(`<button class="btn btn-sm" onclick="act('${id}','approve')">Approve only</button>`); }
+  if(p.status==='active')   acts.push(`<button class="btn btn-primary btn-sm" onclick="runProject('${id}')">▶ Run</button>`);
   if(p.status==='executing')acts.push(`<span class="badge b-running">● agents working — auto-refreshing</span>`);
+  if(p.status==='done')     acts.push(`<span class="badge b-done">✓ done — see Deliverables below</span>`);
   el.append($(`<div class="panel" style="margin-top:12px"><div class="row" style="align-items:flex-start">
       <div style="flex:1"><div style="font-size:17px;font-weight:650">${esc(p.goal)}</div>
         <div class="kv" style="margin-top:8px">${badge(p.status)} ${badge(p.health)}
@@ -405,11 +407,20 @@ async function directive(){
   if(!goal){ m.textContent='Enter a goal first.'; return; }
   m.textContent='Planning…';
   try{ const p=await api('POST','/projects',{goal});
-    m.innerHTML=`Plan drafted — <b>${p.tasks.length}</b> tasks across <b>${new Set(p.tasks.map(t=>t.department_id)).size}</b> departments. <a class="back" href="#/project/${p.id}">open →</a>`;
-    toast('Project drafted','ok');
+    toast(`Plan drafted — ${p.tasks.length} tasks. Click ▶ Run it.`,'ok');
+    location.hash='#/project/'+p.id;   // land on the project so Run is one click away
   }catch(e){ m.textContent='Error '+(e.status||'')+': '+(e.detail||''); }
 }
 let _ptimer=null;
+async function runProject(id){   // one click: approve (if needed) + execute + watch live
+  try{
+    const p=await api('GET','/projects/'+id);
+    if(p.status==='planning') await api('POST','/projects/'+id+'/approve');
+    await api('POST','/projects/'+id+'/execute');
+    toast('Running — agents are working, watch the Team chat','ok');
+    V.project(id);
+  }catch(e){ toast('Error '+(e.status||'')+': '+(e.detail||''),'err'); }
+}
 async function act(id, what){
   try{
     await api('POST',`/projects/${id}/${what}`);
