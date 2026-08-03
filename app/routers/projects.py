@@ -1,10 +1,12 @@
 """Phase 1 gate over HTTP: goal -> reviewable DAG -> approve -> execute -> slip recompute."""
+import threading
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, current_principal, require_role
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.models import Artifact, Department, HandoffPacket, MemoryRecord, Message, Project, Task, Thread
 from app.schemas import (
     ArtifactOut, HandoffOut, MessageOut, ProjectCreate, ProjectOut, SlipRequest, ThreadOut, TaskOut,
@@ -69,12 +71,39 @@ def approve(project_id: str, db: Session = Depends(get_db),
     return _project_out(db, project)
 
 
-@router.post("/projects/{project_id}/execute", response_model=list[ArtifactOut])
+_exec_lock = threading.Lock()
+
+
+def _run_in_background(project_id: str) -> None:
+    """Execute a project in its own session/thread so the HTTP request returns immediately.
+    Agents can take minutes each (local model) — the UI polls status/chat instead of hanging."""
+    db = SessionLocal()
+    try:
+        project = db.get(Project, project_id)
+        planning.execute_project(db, project)
+    except Exception:
+        db.rollback()
+        project = db.get(Project, project_id)
+        if project and project.status == "executing":
+            project.status = "active"  # revert so it can be retried
+            db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/projects/{project_id}/execute")
 def execute(project_id: str, db: Session = Depends(get_db),
-            p: Principal = Depends(current_principal)) -> list[ArtifactOut]:
+            p: Principal = Depends(current_principal)) -> dict:
     project = _load(db, p, project_id)
-    arts = planning.execute_project(db, project)
-    return [_artifact_out(a) for a in arts]
+    # guard: one execution at a time per project (check-and-set under a lock)
+    with _exec_lock:
+        db.refresh(project)
+        if project.status == "executing":
+            raise HTTPException(status_code=409, detail="already executing — watch the Team chat")
+        project.status = "executing"
+        db.commit()
+    threading.Thread(target=_run_in_background, args=(project.id,), daemon=True).start()
+    return {"status": "executing", "message": "Agents are working. Watch the Team chat — refresh to see progress."}
 
 
 @router.get("/projects/{project_id}/memory")

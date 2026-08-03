@@ -236,6 +236,7 @@ V.project = async (id) => {
   const acts = [];
   if(p.status==='planning') acts.push(`<button class="btn btn-primary btn-sm" onclick="act('${id}','approve')">Approve &amp; schedule</button>`);
   if(p.status==='active')   acts.push(`<button class="btn btn-primary btn-sm" onclick="act('${id}','execute')">Execute</button>`);
+  if(p.status==='executing')acts.push(`<span class="badge b-running">● agents working — auto-refreshing</span>`);
   el.append($(`<div class="panel" style="margin-top:12px"><div class="row" style="align-items:flex-start">
       <div style="flex:1"><div style="font-size:17px;font-weight:650">${esc(p.goal)}</div>
         <div class="kv" style="margin-top:8px">${badge(p.status)} ${badge(p.health)}
@@ -283,6 +284,11 @@ V.project = async (id) => {
     <p class="muted" style="margin:-6px 0 12px">Each agent reads this before working, and writes to it after — so the team builds on itself instead of starting blank.</p>
     ${mem.length?mem.map(m=>`<div class="row" style="padding:8px 0;border-bottom:1px solid var(--border)">
         <span class="chip">${esc(dept(m.department_id))}</span><span class="muted">${esc(m.content)}</span></div>`).join(''):'<div class="empty">Empty until the project executes.</div>'}</div>`));
+
+  // while agents are working, keep refreshing so the chat + deliverables stream in live
+  clearTimeout(_ptimer);
+  if(p.status==='executing' && location.hash.indexOf('/project/'+id) >= 0)
+    _ptimer=setTimeout(()=>V.project(id), 6000);
 };
 
 V.leads = async () => {
@@ -403,7 +409,14 @@ async function directive(){
     toast('Project drafted','ok');
   }catch(e){ m.textContent='Error '+(e.status||'')+': '+(e.detail||''); }
 }
-async function act(id, what){ try{ await api('POST',`/projects/${id}/${what}`); toast(what+'d','ok'); V.project(id); }catch(e){ toast('Error: '+(e.detail||e.status),'err'); } }
+let _ptimer=null;
+async function act(id, what){
+  try{
+    await api('POST',`/projects/${id}/${what}`);
+    toast(what==='execute'?'Agents are working — watch the Team chat fill in':(what+'d'),'ok');
+    V.project(id);   // re-renders; while status is "executing" it self-refreshes
+  }catch(e){ toast('Error '+(e.status||'')+': '+(e.detail||''),'err'); }
+}
 async function decide(id, decision){
   const reason=(document.getElementById('r_'+id)||{}).value||null;
   try{ await api('POST',`/approvals/${id}/decide`,{decision,reason}); toast(decision==='approve'?'Approved':'Rejected','ok'); render(); }

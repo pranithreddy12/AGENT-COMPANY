@@ -68,9 +68,10 @@ def test_project_gate(client):
     assert proj["status"] == "active" and proj["critical_path"] and proj["due_at"]
     crit_before = proj["critical_path"]
 
-    # execute lands artifacts
-    arts = client.post(f"/projects/{pid}/execute", headers=auth).json()
-    assert len(arts) == 7 and all(a["content"] for a in arts)
+    # execute kicks off in the background and returns immediately (execution correctness is
+    # covered by the direct unit tests; the endpoint just starts it and guards double-runs)
+    r = client.post(f"/projects/{pid}/execute", headers=auth)
+    assert r.status_code == 200 and r.json()["status"] == "executing"
 
     # slip a parallel-branch task enough to steal the critical path
     t4 = next(t for t in proj["tasks"] if "test plan" in t["goal"].lower())
