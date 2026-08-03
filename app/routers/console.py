@@ -81,7 +81,7 @@ _HTML = """<!doctype html><meta charset=utf-8><title>Company OS — CEO Console<
 <header class=row><b>Company OS</b> — CEO Console
  <span style=flex:1></span>
  <input id=tok placeholder="paste access_token" size=40>
- <button onclick=loadAll()>Load</button></header>
+ <button onclick=save()>Load</button></header>
 <main>
  <div class=card><h2>Directive</h2><div class=row>
    <input id=goal placeholder="State a goal…" style=flex:1>
@@ -97,6 +97,8 @@ _HTML = """<!doctype html><meta charset=utf-8><title>Company OS — CEO Console<
 <script>
 const T=()=>document.getElementById('tok').value
 const H=()=>({authorization:'Bearer '+T(),'content-type':'application/json'})
+function save(){localStorage.setItem('cos_tok',T());loadAll()}         // persist token across reloads
+window.addEventListener('load',()=>{const t=localStorage.getItem('cos_tok');if(t){document.getElementById('tok').value=t;loadAll()}})
 async function loadAll(){await standup();await approvals()}
 async function standup(){
  const s=await(await fetch('/console/standup',{headers:H()})).json()
@@ -124,9 +126,12 @@ async function decide(id,d){
 }
 async function directive(){
  const goal=document.getElementById('goal').value
+ const m=document.getElementById('dmsg')
+ if(!T()){m.textContent='Paste your access token above and click Load first.';return}
  const r=await fetch('/projects',{method:'POST',headers:H(),body:JSON.stringify({goal})})
- document.getElementById('dmsg').textContent=r.ok?'Plan drafted — review tasks via API, then approve.':'Error'
- standup()
+ if(r.ok){const p=await r.json();m.textContent='Plan drafted — '+p.tasks.length+' tasks across '+new Set(p.tasks.map(t=>t.department_id)).size+' departments. Approve via API/docs.';standup()}
+ else if(r.status===401){m.textContent='401 — token missing or expired. Paste a fresh token and click Load.'}
+ else{m.textContent='Error '+r.status+': '+await r.text()}
 }
 async function post(u){await fetch(u,{method:'POST',headers:H()});standup()}
 </script>"""
