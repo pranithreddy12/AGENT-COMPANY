@@ -32,6 +32,7 @@ class Organization(Base):
     killed: Mapped[bool] = mapped_column(default=False)  # global kill switch
     simulation: Mapped[bool] = mapped_column(default=False)  # dry-run: no real side effects
     qualification_framework: Mapped[str] = mapped_column(String, default="BANT")  # BANT|MEDDIC
+    webhook_secret_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # sha256 of LeadForge secret
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 

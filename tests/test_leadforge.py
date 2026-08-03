@@ -58,6 +58,55 @@ def test_handoff_endpoint_requires_role(db):
     assert res.project_id and len(res.tasks) >= 3
 
 
+def test_webhook_secret_auth_end_to_end():
+    """LeadForge authenticates with a long-lived X-LeadForge-Secret header (no JWT)."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    import app.models  # noqa: F401
+    from app.db import Base, get_db
+    from app.main import app as application
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def _override():
+        s = TestingSession()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    application.dependency_overrides[get_db] = _override
+    client = TestClient(application)
+    try:
+        org = client.post("/orgs", json={"name": "Acme", "ceo_email": "c@a.com", "ceo_password": "pw"}).json()
+        ceo = {"authorization": f"Bearer {org['access_token']}"}
+        payload = _dubai_handoff().model_dump()
+
+        # no auth at all -> 401
+        assert client.post("/integrations/leadforge/handoff", json=payload).status_code == 401
+
+        # generate the webhook secret (ceo only)
+        secret = client.post("/integrations/leadforge/secret", headers=ceo).json()["secret"]
+
+        # wrong secret -> 401
+        r_bad = client.post("/integrations/leadforge/handoff", json=payload,
+                            headers={"x-leadforge-secret": "nope"})
+        assert r_bad.status_code == 401
+
+        # correct secret -> 200, project created, no JWT needed
+        r = client.post("/integrations/leadforge/handoff", json=payload,
+                        headers={"x-leadforge-secret": secret})
+        assert r.status_code == 200, r.text
+        assert r.json()["project_id"] and len(r.json()["tasks"]) >= 3
+    finally:
+        application.dependency_overrides.clear()
+
+
 def test_second_handoff_reuses_account(db):
     org_id = _org(db)
     integrations.ingest_handoff(db, org_id, _dubai_handoff())
