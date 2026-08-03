@@ -20,6 +20,12 @@ def _lead_out(lead: Lead) -> LeadOut:
     )
 
 
+@router.get("/leads", response_model=list[LeadOut])
+def list_leads(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> list[LeadOut]:
+    from sqlalchemy import select
+    return [_lead_out(l) for l in db.scalars(select(Lead).where(Lead.org_id == p.org_id).order_by(Lead.created_at.desc()))]
+
+
 @router.post("/leads", response_model=LeadOut)
 def create_lead(body: LeadCreate, db: Session = Depends(get_db),
                 p: Principal = Depends(current_principal)) -> LeadOut:

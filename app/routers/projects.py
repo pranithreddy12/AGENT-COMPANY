@@ -1,11 +1,11 @@
 """Phase 1 gate over HTTP: goal -> reviewable DAG -> approve -> execute -> slip recompute."""
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, current_principal, require_role
 from app.db import get_db
-from app.models import Artifact, HandoffPacket, Message, Project, Task, Thread
+from app.models import Artifact, Department, HandoffPacket, Message, Project, Task, Thread
 from app.schemas import (
     ArtifactOut, HandoffOut, MessageOut, ProjectCreate, ProjectOut, SlipRequest, ThreadOut, TaskOut,
 )
@@ -116,10 +116,40 @@ def override_veto(artifact_id: str, db: Session = Depends(get_db),
     return _artifact_out(art)
 
 
+@router.get("/departments")
+def list_departments(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> list[dict]:
+    return [{"id": d.id, "name": d.name, "charter": d.charter, "paused": d.paused}
+            for d in db.scalars(select(Department).where(Department.org_id == p.org_id).order_by(Department.name))]
+
+
+@router.get("/projects")
+def list_projects(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> list[dict]:
+    projs = db.scalars(select(Project).where(Project.org_id == p.org_id).order_by(Project.created_at.desc()))
+    out = []
+    for pr in projs:
+        n = db.scalar(select(func.count(Task.id)).where(Task.project_id == pr.id)) or 0
+        out.append({"id": pr.id, "goal": pr.goal, "status": pr.status, "health": pr.health,
+                    "due_at": pr.due_at.isoformat() if pr.due_at else None, "account_id": pr.account_id, "tasks": n})
+    return out
+
+
 @router.get("/projects/{project_id}", response_model=ProjectOut)
 def get_project(project_id: str, db: Session = Depends(get_db),
                 p: Principal = Depends(current_principal)) -> ProjectOut:
     return _project_out(db, _load(db, p, project_id))
+
+
+@router.get("/projects/{project_id}/artifacts")
+def project_artifacts(project_id: str, db: Session = Depends(get_db),
+                      p: Principal = Depends(current_principal)) -> list[dict]:
+    _load(db, p, project_id)
+    tasks = {t.id: t for t in db.scalars(select(Task).where(Task.project_id == project_id))}
+    if not tasks:
+        return []
+    arts = db.scalars(select(Artifact).where(Artifact.task_id.in_(list(tasks))))
+    return [{"id": a.id, "task_goal": tasks[a.task_id].goal, "department_id": tasks[a.task_id].department_id,
+             "status": a.status, "blocked": a.blocked, "block_reason": a.block_reason,
+             "needs_human": a.needs_human, "version": a.version, "content": a.content} for a in arts]
 
 
 @router.post("/tasks/{task_id}/slip", response_model=ProjectOut)
