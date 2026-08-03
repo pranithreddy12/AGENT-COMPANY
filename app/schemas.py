@@ -255,6 +255,34 @@ class FollowUpTaskOut(BaseModel):
     status: str
 
 
+class LeadForgeSignal(BaseModel):
+    signal: str                 # e.g. "no online booking"
+    source: str | None = None   # where LeadForge found it (the citation)
+
+
+class LeadForgeHandoff(BaseModel):
+    """Payload LeadForge POSTs when a warm reply / proposal request lands. Company OS takes over
+    from here: it owns delivery, LeadForge owned find->qualify->outreach->reply."""
+    event: str = "proposal_requested"          # proposal_requested | warm_reply
+    company: str
+    contact_name: str | None = None
+    contact_email: str | None = None
+    industry: str | None = None
+    location: str | None = None
+    signals: list[LeadForgeSignal] = []        # the researched "why this lead" — carried through
+    context: str | None = None                 # the reply text / what they asked for
+    goal: str | None = None                    # optional override; default derives from company+industry
+    leadforge_lead_id: str | None = None
+
+
+class LeadForgeHandoffResult(BaseModel):
+    account_id: str
+    lead_id: str
+    project_id: str
+    project_status: str
+    tasks: list[TaskOut]
+
+
 class CallOut(BaseModel):
     id: str
     direction: str

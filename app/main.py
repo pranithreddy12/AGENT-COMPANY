@@ -4,7 +4,8 @@ from fastapi import FastAPI
 
 from app.db import init_db
 from app.routers import (
-    console, crm, governance, health, human, intelligence, orgs, portal, projects, runs, voice,
+    console, crm, governance, health, human, integrations, intelligence, orgs, portal, projects,
+    runs, voice,
 )
 
 
@@ -26,3 +27,4 @@ app.include_router(crm.router)
 app.include_router(portal.router)
 app.include_router(voice.router)
 app.include_router(intelligence.router)
+app.include_router(integrations.router)
