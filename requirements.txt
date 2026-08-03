@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+pydantic>=2
+pydantic-settings
+pyjwt
+httpx
+pytest
+# anthropic  # optional: only needed for the live LLM provider (a real run with a key)
