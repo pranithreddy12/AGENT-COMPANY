@@ -162,13 +162,13 @@ def list_departments(db: Session = Depends(get_db), p: Principal = Depends(curre
 
 @router.get("/projects")
 def list_projects(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> list[dict]:
-    projs = db.scalars(select(Project).where(Project.org_id == p.org_id).order_by(Project.created_at.desc()))
-    out = []
-    for pr in projs:
-        n = db.scalar(select(func.count(Task.id)).where(Task.project_id == pr.id)) or 0
-        out.append({"id": pr.id, "goal": pr.goal, "status": pr.status, "health": pr.health,
-                    "due_at": pr.due_at.isoformat() if pr.due_at else None, "account_id": pr.account_id, "tasks": n})
-    return out
+    projs = list(db.scalars(select(Project).where(Project.org_id == p.org_id).order_by(Project.created_at.desc())))
+    # one grouped count for the whole org instead of a COUNT(*) per project (was N+1)
+    counts = dict(db.execute(select(Task.project_id, func.count(Task.id))
+                             .where(Task.org_id == p.org_id).group_by(Task.project_id)).all())
+    return [{"id": pr.id, "goal": pr.goal, "status": pr.status, "health": pr.health,
+             "due_at": pr.due_at.isoformat() if pr.due_at else None, "account_id": pr.account_id,
+             "tasks": counts.get(pr.id, 0)} for pr in projs]
 
 
 @router.get("/projects/{project_id}", response_model=ProjectOut)
