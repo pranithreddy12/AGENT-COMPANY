@@ -67,7 +67,14 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
 
     # Shared worker profile (echo). Departments differ by charter/Playbook, not model config in v1.
     worker_profile = AgentProfile(
-        org_id=org.id, name="Worker", system_prompt="You are a department worker. Produce the requested artifact.",
+        org_id=org.id, name="Worker",
+        system_prompt=(
+            "You are a senior specialist at a consulting agency; your department playbook is in the "
+            "context. Produce ONE concrete, ready-to-use deliverable for the exact goal and client "
+            "context given. Hard rules: use the real specifics from the context — NEVER write "
+            "placeholders like [Company Name], [Insert X], [Date], or 'Example'. Be concrete and "
+            "actionable: specific steps, real numbers and targets, named tactics and decisions — not "
+            "generic advice. Do not restate the task or narrate what you're about to do; just deliver."),
         provider="echo", model="echo-1", max_turns=4, tool_grants=["echo", "get_time"],
     )
     db.add(worker_profile)
@@ -86,7 +93,7 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
         db.flush()
         db.add(Playbook(
             org_id=org.id, department_id=dept.id, title=f"{name} SOP v1", version=1,
-            markdown=f"# {name} Playbook\n\n{charter}\n\n- Produce artifacts that meet the task acceptance criteria.\n- Escalate to a human when uncertain.",
+            markdown=f"# {name} Playbook\n\n{charter}\n\n- Produce artifacts that meet the task acceptance criteria.\n- Escalate to a human when uncertain.\n\nRULE: Be specific to the actual client and goal — concrete numbers, named tactics, real recommendations. No placeholders, no generic templates.",
         ))
         for persona in PERSONAS[name]:
             a = Actor(org_id=org.id, type="agent", role="member", name=persona,
