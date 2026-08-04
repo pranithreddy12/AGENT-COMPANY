@@ -292,6 +292,26 @@ def test_proposal_get_and_approve_over_http():
         application.dependency_overrides.clear()
 
 
+def test_generation_failure_marks_failed_and_frees_slot(db):
+    """If generation can't run (no Sales agent / provider), the proposal is marked 'failed' and its
+    dedup slot is freed, so a LeadForge retry regenerates instead of being stuck on a dead proposal."""
+    from app.models import Actor, Department
+    org_id = _org(db)
+    sales = db.scalars(select(Department).where(Department.org_id == org_id, Department.name == "Sales")).first()
+    for a in db.scalars(select(Actor).where(Actor.department_id == sales.id)):
+        db.delete(a)  # no Sales member -> no provider can be built
+    db.flush()
+
+    project, _ = integrations.start_proposal(db, org_id, _dubai_handoff())
+    art, _researched = integrations._produce_proposal_artifact(db, project, _dubai_handoff())
+    db.commit()
+    assert art is None and project.status == "failed" and project.leadforge_lead_id is None
+
+    # slot freed -> a retry is a fresh attempt, not a dedup hit on the dead proposal
+    _p2, is_new = integrations.start_proposal(db, org_id, _dubai_handoff())
+    assert is_new
+
+
 def test_second_handoff_reuses_account(db):
     org_id = _org(db)
     integrations.ingest_handoff(db, org_id, _dubai_handoff())
