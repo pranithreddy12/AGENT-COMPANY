@@ -9,17 +9,26 @@ from app.routers import (
 )
 
 
-def _recover_stuck_executions() -> None:
-    """A restart kills in-flight background executions; reset them to 'active' so they're retryable."""
+def recover_stuck(db) -> None:
+    """A restart kills in-flight background work, leaving projects stuck mid-status. Reset them so
+    they're never permanently stuck: an 'executing' project goes back to 'active' (re-runnable); a
+    'generating' proposal goes to 'failed' with its dedup slot freed so a LeadForge retry regenerates
+    (otherwise the client would poll a proposal that never finishes). Takes a session so it's testable."""
     from sqlalchemy import select
 
     from app.models import Project
 
+    for pr in db.scalars(select(Project).where(Project.status == "executing")):
+        pr.status = "active"
+    for pr in db.scalars(select(Project).where(Project.status == "generating")):
+        pr.status, pr.leadforge_lead_id = "failed", None
+    db.commit()
+
+
+def _recover_stuck_executions() -> None:
     db = SessionLocal()
     try:
-        for pr in db.scalars(select(Project).where(Project.status == "executing")):
-            pr.status = "active"
-        db.commit()
+        recover_stuck(db)
     finally:
         db.close()
 

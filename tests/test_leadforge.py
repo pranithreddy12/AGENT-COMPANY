@@ -153,6 +153,44 @@ def test_proposal_without_lead_id_is_not_deduped(db):
     assert len(list(db.scalars(select(Artifact).where(Artifact.type == "proposal")))) == 2
 
 
+def test_async_proposal_shell_then_ready(db):
+    """The async path: start_proposal returns a 'generating' shell instantly (no LLM); a second
+    request before it finishes dedups to the same shell; the background produce step fills it to
+    'ready' with a human-gated artifact."""
+    org_id = _org(db)
+    project, is_new = integrations.start_proposal(db, org_id, _dubai_handoff())
+    db.commit()
+    assert is_new and project.status == "generating"
+
+    # a retry while still generating -> same shell, no new project, no new work
+    p2, is_new2 = integrations.start_proposal(db, org_id, _dubai_handoff())
+    assert not is_new2 and p2.id == project.id
+
+    # background half fills the proposal
+    art, _researched = integrations._produce_proposal_artifact(db, project, _dubai_handoff())
+    db.commit()
+    assert project.status == "ready"
+    assert art is not None and art.type == "proposal" and art.needs_human is True
+
+
+def test_stuck_generating_recovered_and_retryable(db):
+    """A restart mid-generation must not leave a proposal stuck: recover_stuck marks it 'failed' and
+    frees the dedup slot so a LeadForge retry can regenerate instead of polling forever."""
+    from app.main import recover_stuck
+    org_id = _org(db)
+    project, _ = integrations.start_proposal(db, org_id, _dubai_handoff())
+    db.commit()
+    assert project.status == "generating" and project.leadforge_lead_id == "lf_123"
+
+    recover_stuck(db)
+    db.refresh(project)
+    assert project.status == "failed" and project.leadforge_lead_id is None
+
+    # slot freed -> a retry is a fresh generation, not a dedup hit on the dead one
+    _p2, is_new = integrations.start_proposal(db, org_id, _dubai_handoff())
+    assert is_new
+
+
 def test_second_handoff_reuses_account(db):
     org_id = _org(db)
     integrations.ingest_handoff(db, org_id, _dubai_handoff())

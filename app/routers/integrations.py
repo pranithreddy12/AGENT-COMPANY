@@ -1,5 +1,6 @@
 """Inbound integrations. LeadForge posts here when a prospect is ready for delivery."""
 import secrets as pysecrets
+import threading
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -41,9 +42,15 @@ def leadforge_handoff(body: LeadForgeHandoff, db: Session = Depends(get_db),
 @router.post("/integrations/leadforge/proposal")
 def leadforge_proposal(body: LeadForgeHandoff, db: Session = Depends(get_db),
                        p: Principal = Depends(leadforge_principal)) -> dict:
-    """Generate ONE client-ready proposal for a prospect (grounded in signals + web research,
-    Legal-checked, queued for human approval). This is the 'run one real deal' path — the actual
-    document to review and send back through LeadForge."""
-    result = integrations.generate_proposal(db, p.org_id, body)
-    db.commit()
-    return result
+    """Kick off ONE client-ready proposal for a prospect and return immediately with a proposal_id.
+    Generation (research + LLM + Legal, up to ~60s) runs in the background; the webhook never blocks
+    and never returns the draft text. LeadForge fetches the text later via GET /proposals/{id}, which
+    only releases it once a human has approved it. Idempotent on leadforge_lead_id (a retry returns
+    the same proposal_id, not a new proposal)."""
+    project, is_new = integrations.start_proposal(db, p.org_id, body)
+    project_id, status = project.id, project.status
+    db.commit()  # persist the shell before the worker (its own session) loads it
+    if is_new:
+        threading.Thread(target=integrations.run_proposal_in_background,
+                         args=(project_id, body), daemon=True).start()
+    return {"proposal_id": project_id, "status": status, "idempotent": not is_new}

@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.db import SessionLocal
 from app.models import Account, Actor, AgentProfile, Artifact, Contact, Department, Lead, Project, Task
 from app.services import llm, planning, research, review
 
@@ -64,21 +65,43 @@ def _existing_proposal(db: Session, org_id: str, leadforge_lead_id: str | None) 
         Project.org_id == org_id, Project.leadforge_lead_id == leadforge_lead_id)).first()
 
 
-def generate_proposal(db: Session, org_id: str, hf) -> dict:
-    """One client-ready proposal for a real prospect (the LeadForge 'proposal_requested' path).
-    Grounded in the prospect's pain signals + web research, Legal-checked, queued for human approval
-    — NOT the generic multi-task decomposition. Returns the proposal text for review/send.
-
-    Idempotent on leadforge_lead_id: a webhook retry returns the existing proposal instead of a new
-    one (a timeout-then-retry must not send the client three proposals). The early check skips the
-    LLM cost on the common sequential retry; the unique index + IntegrityError catch is the real
-    guarantee under a concurrent race."""
+def start_proposal(db: Session, org_id: str, hf) -> tuple[Project, bool]:
+    """Fast, synchronous: create the proposal shell (account + lead + a 'generating' Project keyed by
+    leadforge_lead_id) and return (project, is_new). No LLM here — so the webhook returns instantly.
+    Idempotent: an existing proposal for the same lead returns (existing, False) and starts no new
+    work. The unique index + IntegrityError catch closes the concurrent-retry race."""
     existing = _existing_proposal(db, org_id, hf.leadforge_lead_id)
     if existing is not None:
-        return _proposal_result(db, existing, idempotent=True)
+        return existing, False
 
-    account, lead = _account_and_lead(db, org_id, hf)
+    account, _lead = _account_and_lead(db, org_id, hf)
+    project = Project(org_id=org_id, goal=f"Proposal for {hf.company}", account_id=account.id,
+                      status="generating", health="on_track", leadforge_lead_id=hf.leadforge_lead_id)
+    db.add(project)
+    try:
+        db.flush()  # unique (org_id, leadforge_lead_id) — a concurrent duplicate raises here
+    except IntegrityError:
+        db.rollback()  # the other request won the race; drop our account/lead work
+        existing = _existing_proposal(db, org_id, hf.leadforge_lead_id)
+        if existing is not None:
+            return existing, False
+        raise  # collision but no row found — genuinely unexpected, don't swallow it
+    return project, True
 
+
+def _fail_proposal(project: Project) -> None:
+    """Mark a proposal generation failed and free its dedup slot so a webhook retry can regenerate
+    (a stuck/failed proposal must not block the client from ever getting one)."""
+    project.status = "failed"
+    project.leadforge_lead_id = None
+
+
+def _produce_proposal_artifact(db: Session, project: Project, hf) -> tuple[Artifact | None, bool]:
+    """The slow half (runs in the background thread): research + LLM + Legal -> Task + Artifact under
+    an existing proposal Project. Sets project.status to 'ready' (awaiting human approval) or, on any
+    failure, 'failed'. Returns (artifact, researched); (None, False) on failure. Uses project.org_id
+    so it needs only the project + the handoff data, not the request session."""
+    org_id = project.org_id
     research_ctx = ""
     if settings.serper_api_key:  # research the actual prospect for a grounded proposal
         try:
@@ -93,7 +116,8 @@ def generate_proposal(db: Session, org_id: str, hf) -> dict:
     prof = db.get(AgentProfile, sales.agent_profile_id) if sales else None
     provider = llm.build_provider(prof.provider, prof.model, settings.anthropic_api_key) if prof else None
     if provider is None:
-        return {"error": "no Sales agent configured"}
+        _fail_proposal(project)
+        return None, False
 
     signals = "; ".join(s.signal for s in hf.signals) or "none provided"
     user = (f"Client: {hf.company} ({hf.industry or 'business'}{', ' + hf.location if hf.location else ''}).\n"
@@ -104,24 +128,15 @@ def generate_proposal(db: Session, org_id: str, hf) -> dict:
     try:
         comp = provider.complete(system=_PROPOSAL_SYSTEM, messages=[{"role": "user", "content": user}],
                                  tools=[], max_tokens=3000)
-    except Exception as e:
-        return {"error": f"proposal generation failed: {e}"}
+    except Exception:
+        _fail_proposal(project)
+        return None, False
     text = (comp.text or "").strip()
     if not text:
-        return {"error": "empty proposal"}
+        _fail_proposal(project)
+        return None, False
 
     legal = review.legal_review(text)  # no prohibited claims before it can be sent
-    project = Project(org_id=org_id, goal=f"Proposal for {hf.company}", account_id=account.id,
-                      status="active", health="on_track", leadforge_lead_id=hf.leadforge_lead_id)
-    db.add(project)
-    try:
-        db.flush()  # unique (org_id, leadforge_lead_id) — a concurrent duplicate raises here
-    except IntegrityError:
-        db.rollback()  # the other request won the race; drop our account/lead/proposal work
-        existing = _existing_proposal(db, org_id, hf.leadforge_lead_id)
-        if existing is not None:
-            return _proposal_result(db, existing, idempotent=True)
-        raise  # collision but no row found — genuinely unexpected, don't swallow it
     task = Task(org_id=org_id, project_id=project.id, goal=f"Client proposal for {hf.company}",
                 department_id=dept.id if dept else None, assignee_actor_id=sales.id if sales else None,
                 status="blocked" if not legal.passed else "done", est_effort_hours=1.0)
@@ -132,7 +147,41 @@ def generate_proposal(db: Session, org_id: str, hf) -> dict:
                    blocked=not legal.passed, block_reason=None if legal.passed else "; ".join(legal.reasons))
     db.add(art)
     db.flush()
-    return _proposal_result(db, project, researched=bool(research_ctx))
+    project.status = "ready"  # generated; awaiting human approval before LeadForge may send
+    return art, bool(research_ctx)
+
+
+def run_proposal_in_background(project_id: str, hf) -> None:
+    """Background worker for the async /proposal endpoint: own session/thread so the webhook returns
+    at once. Mirrors projects._run_in_background. On any error the proposal is marked 'failed' (and
+    its dedup slot freed) so LeadForge never polls a stuck 'generating' forever."""
+    db = SessionLocal()
+    try:
+        project = db.get(Project, project_id)
+        if project is None or project.status != "generating":
+            return  # already handled (e.g. a concurrent finisher) — don't double-produce
+        _produce_proposal_artifact(db, project, hf)
+        db.commit()
+    except Exception:
+        db.rollback()
+        project = db.get(Project, project_id)
+        if project and project.status == "generating":
+            _fail_proposal(project)
+            db.commit()
+    finally:
+        db.close()
+
+
+def generate_proposal(db: Session, org_id: str, hf) -> dict:
+    """Synchronous full generate (shell + content in one call). Used directly (tests, scripts). The
+    async webhook path uses start_proposal + run_proposal_in_background instead so it never blocks."""
+    project, is_new = start_proposal(db, org_id, hf)
+    if not is_new:
+        return _proposal_result(db, project, idempotent=True)
+    art, researched = _produce_proposal_artifact(db, project, hf)
+    if art is None:
+        return {"error": "proposal generation failed", "proposal_id": project.id, "status": project.status}
+    return _proposal_result(db, project, researched=researched)
 
 
 def ingest_handoff(db: Session, org_id: str, hf) -> tuple[Account, Lead, Project, list]:
