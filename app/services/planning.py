@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Actor, AgentProfile, AgentRun, Artifact, Department, MemoryRecord, Playbook, Project, Task, Thread
-from app.services import cost, communication, events, playbooks, review, runs, scheduling
+from app.services import cost, communication, events, playbooks, research, review, runs, scheduling
 from app.services.llm import build_provider
 
 MAX_REVISE_CYCLES = 2  # Critic revise loop cap -> escalate to human. Bounds the loop.
@@ -311,6 +311,12 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
     critic = _critic_actor(db, project.org_id)
     artifacts_by_task: dict[str, Artifact] = {}
     _kickoff(db, project, tasks, order, actors)  # the Lead opens the team chat
+
+    # Research agent goes first: web search on the goal -> sourced brief in shared memory for everyone
+    rsummary = research.run_research(db, project)
+    if rsummary:
+        rex = research.rex(db, project.org_id)
+        _post(db, project, rex.id if rex else None, f"Rex Research Agent: {rsummary}")
 
     for tid in order:
         t = tasks[tid]

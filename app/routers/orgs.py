@@ -110,6 +110,17 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
     db.add(critic_profile)
     db.flush()
     db.add(Actor(org_id=org.id, type="agent", role="critic", name="Quinn QA Agent", agent_profile_id=critic_profile.id))
+
+    # Research agent — searches the web at the start of every project and shares findings with the team.
+    research_profile = AgentProfile(
+        org_id=org.id, name="Researcher",
+        system_prompt="You are the Research agent. Produce sourced, factual research briefs.",
+        provider="echo", model="echo-1", max_turns=2, tool_grants=["web_search"],
+    )
+    db.add(research_profile)
+    db.flush()
+    db.add(Actor(org_id=org.id, type="agent", role="research", name="Rex Research Agent",
+                 agent_profile_id=research_profile.id))
     db.commit()
 
     # actor_id returned = first worker agent (handy for the Phase 0 trivial-run demo).
