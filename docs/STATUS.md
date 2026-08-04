@@ -4,8 +4,8 @@
 coordinated by a Lead, reviewed by a Critic, gated by governance) turns a CEO goal into a task DAG,
 executes it, and produces reviewed deliverables — with a web console to run and watch it.
 
-- **Repo:** https://github.com/pranithreddy12/AGENT-COMPANY (branch `main`, HEAD `b65a046`)
-- **Tests:** 65 passing (`pytest -q`)
+- **Repo:** https://github.com/pranithreddy12/AGENT-COMPANY (branch `main`, HEAD `2043b63`)
+- **Tests:** 75 passing (`pytest -q`)
 - **Stack:** FastAPI + SQLAlchemy 2.0 + SQLite (WAL) + Pydantic v2; vanilla single-file HTML/JS console.
   No Node build. Python 3.11.
 
@@ -25,6 +25,15 @@ executes it, and produces reviewed deliverables — with a web console to run an
 - **Team chat** (`Thread` type=status): first-person messages — Lead kicks off, each agent acknowledges who handed to it and hands to who's next. Bounded (kickoff + start + done per task), commits live so the console streams it.
 - **Per-agent memory**: each agent has its own to-do / completed task lists (shown in console, and in its answers).
 - **Ask-an-agent**: `POST /agents/{id}/ask` — any agent answers in first person, grounded in its scorecard, deliverables, tasks, and project memory.
+
+## LeadForge proposal path — the "one real deal" flow (hardened, `/plan-eng-review`)
+LeadForge posts a warm prospect; Company OS drafts one client-ready proposal, a human approves it, LeadForge sends it. The path is async and safe to run against a real client:
+- `POST /integrations/leadforge/proposal` → returns `{proposal_id, status:"generating"}` **instantly, no draft text**. Research + LLM + Legal run in a background thread (`integrations.run_proposal_in_background`).
+- **Idempotent** on `leadforge_lead_id`: a unique index `(org_id, leadforge_lead_id)` on `projects` + an early-return check mean a webhook retry returns the same `proposal_id`, never a duplicate proposal. (SQLite migration in `db._migrate_sqlite`, no Alembic yet.)
+- `GET /proposals/{id}` → status only until approved; **releases the proposal TEXT only when `status=approved` and not blocked** — the real send gate.
+- `POST /proposals/{id}/approve` (ceo/dept_head only, no webhook-secret path) → clears `needs_human`, marks approved. Refuses a still-generating (409) or Legal-blocked (409) proposal.
+- Failure/interrupt self-recovers: a failed generation is marked `failed` with its dedup slot freed (retryable); `main.recover_stuck` resets stuck `generating` on restart.
+- Legal is a **coarse keyword screen** (`review.PROHIBITED_MARKERS`), not a real compliance review — human approval is the gate. `generate_proposal` remains as a synchronous convenience for direct/test use.
 
 ## LLM provider layer (`app/services/llm.py`) — provider-abstracted
 - `EchoProvider` (deterministic, zero-cost, default seed + all tests), `OllamaProvider` (local, qwen2.5:7b), `MistralProvider` (cloud, OpenAI-compatible), `AnthropicProvider`.
@@ -56,7 +65,8 @@ Console flow: paste an access token (from `POST /orgs` or `POST /login`) → Das
 - **SERPER_API_KEY not set** → Rex sits out. Add to `.env` to activate web research.
 - Output quality is model-bound: Mistral is good; local 7B is generic. Prompts already demand specificity + Critic rejects placeholders.
 - Deferred (from code review, low severity): echo-provider guard for Rex, register `web_search` as a real tool, dedupe a double `rex()` query, add org filter in one `talk.py` query.
-- Not built for production: still SQLite (Postgres via `DATABASE_URL`), no Alembic, no real send channels (LeadForge handoff endpoint exists at `POST /integrations/leadforge/handoff` with webhook-secret auth).
+- Not built for production: still SQLite (Postgres via `DATABASE_URL`), no Alembic (schema changes go through `db._migrate_sqlite`). Company OS drafts + gates proposals but does NOT send — LeadForge fetches approved text via `GET /proposals/{id}` and sends through its own hardened channels.
+- Background work is raw daemon threads on one SQLite file (fine at this scale). Under true concurrency a proposal holds the write lock through its LLM call; the deferred move is a DB-backed job row + single worker if `database is locked` ever shows up.
 
 ## Reminder
 Rotate the Mistral key that briefly appeared in a tracked file earlier (`ESF4…`), if not already done.
