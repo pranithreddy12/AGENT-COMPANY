@@ -57,7 +57,7 @@ def draft_project(db: Session, org_id: str, goal: str, account_id: str | None = 
 
     provider = build_provider(profile.provider, profile.model, settings.anthropic_api_key)
     try:
-        pr = provider.plan(goal=goal, departments=list(depts), max_tokens=profile.max_tokens)
+        pr = provider.plan(goal=goal, departments=list(depts), max_tokens=max(profile.max_tokens, 4096))
     except Exception as e:  # fail closed
         runs._finish(db, run, "failed", error=f"plan: {e}")
         raise PlanError(str(e))

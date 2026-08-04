@@ -356,6 +356,12 @@ V.agents = async () => {
         ${scTile('Runs', a.scorecard.runs)}
         ${scTile('Cost/task', '$'+a.scorecard.cost_per_task)}
       </div>
+      <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px;margin-top:11px">
+        <div><div class="lbl muted" style="margin-bottom:5px">✓ Completed (${a.completed.length})</div>
+          ${a.completed.length?a.completed.map(g=>`<div class="chip" style="background:rgba(52,211,153,.1)">${esc(g).slice(0,42)}</div>`).join(''):'<span class="faint">none yet</span>'}</div>
+        <div><div class="lbl muted" style="margin-bottom:5px">○ To-do (${a.todo.length})</div>
+          ${a.todo.length?a.todo.map(g=>`<div class="chip">${esc(g).slice(0,42)}</div>`).join(''):'<span class="faint">nothing pending</span>'}</div>
+      </div>
       <div class="row" style="margin-top:11px"><input id="q_${a.id}" placeholder="Ask ${esc(a.name)} for a status update or anything…" style="flex:1"><button class="btn btn-sm" onclick="askAgent('${a.id}')">Ask</button></div>
       <div class="faint" id="ans_${a.id}" style="margin-top:9px;white-space:pre-wrap;line-height:1.5"></div>
       </div>`).join('')}</div>`));

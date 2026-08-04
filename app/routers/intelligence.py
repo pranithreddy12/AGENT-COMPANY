@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import Principal, current_principal, require_role
 from app.db import get_db
-from app.models import Actor, AgentProfile, AgentRun, Department
+from app.models import Actor, AgentProfile, AgentRun, Department, Task
 from app.schemas import AskAgentRequest, ConfirmHireRequest, HireOut, HireRequest
 from app.services import intelligence, talk
 from app.tenancy import Tenant
@@ -15,17 +15,24 @@ router = APIRouter(tags=["intelligence"])
 
 @router.get("/agents")
 def list_agents(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> list[dict]:
-    """The workforce: every agent with its role, department, model, autonomy, and live scorecard."""
+    """The workforce: every agent with its role, department, model, scorecard, and its own memory
+    of tasks — what it's completed and what's still on its plate."""
     depts = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == p.org_id))}
+    tasks_by_actor: dict[str, list] = {}
+    for t in db.scalars(select(Task).where(Task.org_id == p.org_id)):
+        tasks_by_actor.setdefault(t.assignee_actor_id, []).append(t)
     out = []
     for a in db.scalars(select(Actor).where(Actor.org_id == p.org_id, Actor.type == "agent")):
         prof = db.get(AgentProfile, a.agent_profile_id) if a.agent_profile_id else None
+        mine = tasks_by_actor.get(a.id, [])
         out.append({
             "id": a.id, "name": a.name or (prof.name if prof else "?"), "role": a.role,
             "department": depts.get(a.department_id) or ("—" if a.role != "lead" else "org-wide"),
             "provider": prof.provider if prof else "?", "model": prof.model if prof else "?",
             "autonomy": prof.autonomy_default if prof else "?", "status": a.status,
             "scorecard": intelligence.scorecard(db, p.org_id, a),
+            "todo": [t.goal for t in mine if t.status != "done"],
+            "completed": [t.goal for t in mine if t.status == "done"],
         })
     role_order = {"lead": 0, "member": 1, "critic": 2}
     return sorted(out, key=lambda x: (role_order.get(x["role"], 3), x["department"]))

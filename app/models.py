@@ -58,7 +58,7 @@ class AgentProfile(Base):
     provider: Mapped[str] = mapped_column(String, default="echo")  # echo|anthropic
     model: Mapped[str] = mapped_column(String, default="echo-1")
     max_turns: Mapped[int] = mapped_column(Integer, default=4)
-    max_tokens: Mapped[int] = mapped_column(Integer, default=1024)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=2048)
     cost_ceiling_usd: Mapped[float] = mapped_column(Float, default=1.0)
     autonomy_default: Mapped[str] = mapped_column(String, default="L1")  # L0..L3
     autonomy_overrides: Mapped[dict] = mapped_column(JSON, default=dict)  # action_type -> level

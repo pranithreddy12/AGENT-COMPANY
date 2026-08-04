@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Actor, AgentProfile, Artifact, Department, MemoryRecord
+from app.models import Actor, AgentProfile, Artifact, Department, MemoryRecord, Task
 from app.services import intelligence, playbooks
 from app.services.llm import build_provider
 
@@ -19,6 +19,11 @@ def ask_agent(db: Session, org_id: str, actor: Actor, question: str, project_id:
     recent = list(db.scalars(select(Artifact).where(Artifact.produced_by_actor_id == actor.id)
                              .order_by(Artifact.created_at.desc())))[:3]
     recent_txt = "\n".join(f"- {a.task_id}: {' '.join(a.content.split())[:180]}" for a in recent) or "(nothing delivered yet)"
+
+    # the agent's own task memory: what's done, what's still to do
+    mine = list(db.scalars(select(Task).where(Task.assignee_actor_id == actor.id)))
+    todo = [t.goal for t in mine if t.status != "done"]
+    completed = [t.goal for t in mine if t.status == "done"]
 
     mem_txt = ""
     if project_id:
@@ -35,6 +40,8 @@ def ask_agent(db: Session, org_id: str, actor: Actor, question: str, project_id:
     user = (
         f"My status: {sc['tasks_completed']} tasks completed, {round(sc['first_pass_rate'] * 100)}% first-pass, "
         f"{sc['runs']} runs.\n"
+        f"My completed tasks: {'; '.join(completed) or '(none yet)'}\n"
+        f"My to-do (still open): {'; '.join(todo) or '(nothing pending)'}\n"
         f"My recent deliverables:\n{recent_txt}\n"
         + (f"\nWhat my team knows on this project:\n{mem_txt}\n" if mem_txt else "")
         + (f"\nMy department playbook:\n{pb.markdown}\n" if pb else "")
