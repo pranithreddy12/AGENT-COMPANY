@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     jwt_ttl_seconds: int = 43200  # 12h — long enough that testing sessions don't get logged out
     anthropic_api_key: str | None = None  # optional; gate + tests run without it
     ollama_base_url: str = "http://localhost:11434"  # local models, no key/cost
+    mistral_api_key: str | None = None  # cloud: fast + far better than local 7B
+    mistral_base_url: str = "https://api.mistral.ai"
 
 
 settings = Settings()

@@ -31,6 +31,15 @@ def test_validate_plan_fails_closed(bad):
 
 # --- item 3: critic verdict parsing (pure, no key) ---
 
+def test_mistral_provider_wiring():
+    from app.services import cost
+    from app.services.llm import MistralProvider
+    p = MistralProvider(api_key="k", model="mistral-small-latest", base_url="https://api.mistral.ai")
+    assert p.api_key == "k" and p.base_url == "https://api.mistral.ai"
+    # cost rate registered so runs don't fail-closed on an unknown model
+    assert cost.compute("mistral-small-latest", 1000, 1000) == round((1000 * 0.2 + 1000 * 0.6) / 1e6, 6)
+
+
 def test_parse_critic_verdict():
     assert review.parse_critic_verdict('{"passed": true, "reasons": []}').passed is True
     v = review.parse_critic_verdict('{"passed": false, "reasons": ["add pricing"]}')

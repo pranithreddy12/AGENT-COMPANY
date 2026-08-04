@@ -25,6 +25,13 @@ def use_ollama(db: Session, org_id: str, model: str = "qwen2.5:7b") -> None:
     db.commit()
 
 
+def use_mistral(db: Session, org_id: str, model: str = "mistral-small-latest") -> None:
+    """Point every agent at Mistral cloud — fast and much better than a local 7B (needs MISTRAL_API_KEY)."""
+    for prof in db.scalars(select(AgentProfile).where(AgentProfile.org_id == org_id)):
+        prof.provider, prof.model = "mistral", model
+    db.commit()
+
+
 def lead_decomposition_eval(db: Session, org_id: str, goal: str = "Launch a new client onboarding service") -> dict:
     """Does the Lead turn a novel goal into a sane, acyclic, multi-step DAG?"""
     project, tasks = planning.draft_project(db, org_id, goal)

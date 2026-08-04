@@ -216,11 +216,13 @@ class OllamaProvider:
     """Local models via Ollama's OpenAI-compatible endpoint. No key, no cost. Text-only (workers
     produce artifacts as text); JSON calls (plan/critic) are extracted + validated with retry."""
 
-    def __init__(self, model: str, base_url: str, timeout: float = 300.0, max_plan_retries: int = 2):
+    def __init__(self, model: str, base_url: str, timeout: float = 300.0, max_plan_retries: int = 2,
+                 api_key: str | None = None):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_plan_retries = max_plan_retries
+        self.api_key = api_key
 
     def _chat(self, system: str, messages: list[dict], max_tokens: int, json_mode: bool = False):
         import httpx
@@ -232,7 +234,8 @@ class OllamaProvider:
         payload = {"model": self.model, "messages": msgs, "stream": False, "max_tokens": max_tokens}
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        r = httpx.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout)
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        r = httpx.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout, headers=headers)
         r.raise_for_status()
         data = r.json()
         content = data["choices"][0]["message"]["content"] or ""
@@ -267,6 +270,13 @@ class OllamaProvider:
         raise PlanParseError(f"plan invalid after {self.max_plan_retries + 1} attempts: {last_err}")
 
 
+class MistralProvider(OllamaProvider):
+    """Mistral cloud via its OpenAI-compatible endpoint — fast, and far better than a local 7B."""
+
+    def __init__(self, api_key: str, model: str, base_url: str, timeout: float = 60.0):
+        super().__init__(model=model, base_url=base_url, timeout=timeout, api_key=api_key)
+
+
 def build_provider(provider: str, model: str, api_key: str | None):
     if provider == "echo":
         return EchoProvider()
@@ -275,6 +285,11 @@ def build_provider(provider: str, model: str, api_key: str | None):
         from app.services import cost
         cost.register_free(model)  # local models are free; keeps cost.compute fail-closed for paid ones
         return OllamaProvider(model=model, base_url=settings.ollama_base_url)
+    if provider == "mistral":
+        from app.config import settings
+        if not settings.mistral_api_key:
+            raise RuntimeError("mistral provider requires MISTRAL_API_KEY")  # fail closed
+        return MistralProvider(api_key=settings.mistral_api_key, model=model, base_url=settings.mistral_base_url)
     if provider == "anthropic":
         if not api_key:
             raise RuntimeError("anthropic provider requires ANTHROPIC_API_KEY")  # fail closed

@@ -12,6 +12,10 @@ RATES: dict[str, tuple[float, float]] = {
     "claude-opus-5": (15.0, 75.0),
     "claude-sonnet-5": (3.0, 15.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
+    # Mistral (approximate USD/1M tokens; calibrate against the current price sheet)
+    "mistral-small-latest": (0.2, 0.6),
+    "mistral-medium-latest": (0.4, 2.0),
+    "mistral-large-latest": (2.0, 6.0),
 }
 
 
