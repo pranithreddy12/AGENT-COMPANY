@@ -35,34 +35,43 @@ def rex(db: Session, org_id: str) -> Actor | None:
     return db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.role == "research")).first()
 
 
+_BRIEF_CONTEXT_CAP = 1500  # chars of the brief injected into every agent's context (bounds token cost)
+
+
 def run_research(db: Session, project: Project) -> str | None:
     """Search the web on the goal, synthesize a brief, write it to shared memory. Returns a one-line
-    summary for the team chat, or None if research is unavailable (no key / no agent / search failed)."""
+    summary for the team chat, or None if research is unavailable/failed — research is always optional
+    and must never sink the project run."""
     agent = rex(db, project.org_id)
     if agent is None or not settings.serper_api_key:
         return None
-    try:
-        results = serper_search(project.goal, num=6)
-    except Exception:
-        return None
-    if not results:
+    # already researched this project? don't run a second billed search / duplicate the brief on re-run
+    if db.scalars(select(MemoryRecord).where(
+            MemoryRecord.project_id == project.id, MemoryRecord.source_actor_id == agent.id)).first():
         return None
 
-    sources = "\n".join(f"- {r['title']}: {r['snippet']} ({r['link']})" for r in results)
-    prof = db.get(AgentProfile, agent.agent_profile_id)
-    provider = llm.build_provider(prof.provider, prof.model, settings.anthropic_api_key)
-    comp = provider.complete(
-        system=_RESEARCH_SYSTEM,
-        messages=[{"role": "user", "content": f"Goal: {project.goal}\n\nWeb results:\n{sources}\n\nWrite the brief."}],
-        tools=[], max_tokens=2048,
-    )
+    try:  # ANY research failure (search, provider init, or synthesis) is swallowed — never aborts execute
+        results = serper_search(project.goal, num=6)
+        if not results:
+            return None
+        sources = "\n".join(f"- {r['title']}: {r['snippet']} ({r['link']})" for r in results)
+        prof = db.get(AgentProfile, agent.agent_profile_id)
+        provider = llm.build_provider(prof.provider, prof.model, settings.anthropic_api_key)
+        comp = provider.complete(
+            system=_RESEARCH_SYSTEM,
+            messages=[{"role": "user", "content": f"Goal: {project.goal}\n\nWeb results:\n{sources}\n\nWrite the brief."}],
+            tools=[], max_tokens=1024,  # a concise brief; the whole team re-reads it, so keep it tight
+        )
+    except Exception:
+        return None
     brief = (comp.text or "").strip()
     if not brief:
         return None
 
-    # full brief goes into shared memory so every agent reads real research
+    # cap what goes into shared context so it isn't re-sent in full on every worker/critic call
+    snippet = brief[:_BRIEF_CONTEXT_CAP] + (" …[brief truncated]" if len(brief) > _BRIEF_CONTEXT_CAP else "")
     db.add(MemoryRecord(org_id=project.org_id, scope="project", project_id=project.id,
                         source_actor_id=agent.id,
-                        content=f"WEB RESEARCH (Rex Research Agent) on '{project.goal}':\n{brief}"))
+                        content=f"WEB RESEARCH (Rex Research Agent) on '{project.goal}':\n{snippet}"))
     db.flush()
     return f"web research done — reviewed {len(results)} sources, brief shared with the team."
