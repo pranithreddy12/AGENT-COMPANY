@@ -6,7 +6,7 @@ in the phases that use them.
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -135,7 +135,15 @@ class Project(Base):
     due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String, default="planning")  # planning|active|done
     health: Mapped[str] = mapped_column(String, default="unknown")  # on_track|at_risk|slipping
+    # set ONLY on proposal projects — the dedup key so a LeadForge webhook retry returns the
+    # existing proposal instead of a new one. NULL on every other project; SQLite treats NULLs as
+    # distinct in a unique index, so the constraint only bites real lead ids.
+    leadforge_lead_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    __table_args__ = (
+        Index("ux_projects_org_leadforge", "org_id", "leadforge_lead_id", unique=True),
+    )
 
 
 class Task(Base):

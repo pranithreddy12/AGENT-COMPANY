@@ -28,11 +28,30 @@ class Base(DeclarativeBase):
     pass
 
 
+def _migrate_sqlite() -> None:
+    """Idempotent hand-migrations for the pre-existing SQLite DB (no Alembic yet): create_all
+    won't add columns/indexes to a table that already exists, so a running company_os.db misses
+    anything added after its tables were first created. ponytail: wire Alembic when this grows a
+    third entry."""
+    if not _is_sqlite:
+        return  # Postgres (prod) builds the current schema fresh via create_all / real migrations
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(projects)")}
+        if "leadforge_lead_id" not in cols:
+            conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN leadforge_lead_id VARCHAR")
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_projects_org_leadforge "
+            "ON projects (org_id, leadforge_lead_id)"
+        ))
+
+
 def init_db() -> None:
     # ponytail: create_all for Phase 0; wire Alembic when the schema starts churning.
     from app import models  # noqa: F401  (register mappers)
 
     Base.metadata.create_all(bind=engine)
+    _migrate_sqlite()
 
 
 def get_db() -> Iterator[Session]:

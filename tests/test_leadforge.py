@@ -118,6 +118,41 @@ def test_proposal_path_produces_one_reviewed_proposal(db):
     assert art.type == "proposal" and art.needs_human is True  # queued for human approval before send
 
 
+def test_proposal_is_idempotent_on_leadforge_lead_id(db):
+    """A LeadForge webhook retry (same leadforge_lead_id) must return the EXISTING proposal, not
+    generate a second one — a timeout-then-retry can't send the client three proposals."""
+    from app.models import Artifact
+    org_id = _org(db)
+    first = integrations.generate_proposal(db, org_id, _dubai_handoff())
+    db.commit()
+    second = integrations.generate_proposal(db, org_id, _dubai_handoff())
+    db.commit()
+
+    # the retry is a dedup hit pointing at the same proposal
+    assert first["idempotent"] is False and second["idempotent"] is True
+    assert second["project_id"] == first["project_id"]
+    assert second["artifact_id"] == first["artifact_id"]
+
+    # exactly one proposal project + one proposal artifact for this lead
+    assert len(list(db.scalars(select(Project).where(Project.org_id == org_id)))) == 1
+    assert len(list(db.scalars(select(Artifact).where(Artifact.type == "proposal")))) == 1
+
+
+def test_proposal_without_lead_id_is_not_deduped(db):
+    """No leadforge_lead_id -> no dedup key -> each call is a distinct proposal (NULLs are distinct
+    in the unique index, so the constraint never collapses unrelated proposals)."""
+    from app.models import Artifact
+    org_id = _org(db)
+    hf = _dubai_handoff()
+    hf.leadforge_lead_id = None
+    integrations.generate_proposal(db, org_id, hf)
+    db.commit()
+    integrations.generate_proposal(db, org_id, hf)
+    db.commit()
+    assert len(list(db.scalars(select(Project).where(Project.org_id == org_id)))) == 2
+    assert len(list(db.scalars(select(Artifact).where(Artifact.type == "proposal")))) == 2
+
+
 def test_second_handoff_reuses_account(db):
     org_id = _org(db)
     integrations.ingest_handoff(db, org_id, _dubai_handoff())

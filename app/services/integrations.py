@@ -7,6 +7,7 @@ generic. Nothing is sent — the resulting proposal still passes Company OS's Cr
 which matches LeadForge's own human-in-the-loop philosophy.
 """
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -42,10 +43,40 @@ def _account_and_lead(db: Session, org_id: str, hf):
     return account, lead
 
 
+def _proposal_result(db: Session, project: Project, *, idempotent: bool = False,
+                     researched: bool = False) -> dict:
+    """Rebuild the proposal response from a stored proposal Project (its Task -> Artifact). One shape
+    whether the proposal was just generated or returned from a dedup hit."""
+    task = db.scalars(select(Task).where(Task.project_id == project.id)).first()
+    art = db.scalars(select(Artifact).where(Artifact.task_id == task.id, Artifact.type == "proposal")
+                     ).first() if task else None
+    return {"account_id": project.account_id, "project_id": project.id,
+            "artifact_id": art.id if art else None,
+            "proposal": art.content if art else "", "blocked": bool(art and art.blocked),
+            "block_reason": art.block_reason if art else None,
+            "researched": researched, "idempotent": idempotent}
+
+
+def _existing_proposal(db: Session, org_id: str, leadforge_lead_id: str | None) -> Project | None:
+    if not leadforge_lead_id:
+        return None  # no dedup key -> can't dedup (NULLs are distinct in the unique index)
+    return db.scalars(select(Project).where(
+        Project.org_id == org_id, Project.leadforge_lead_id == leadforge_lead_id)).first()
+
+
 def generate_proposal(db: Session, org_id: str, hf) -> dict:
     """One client-ready proposal for a real prospect (the LeadForge 'proposal_requested' path).
     Grounded in the prospect's pain signals + web research, Legal-checked, queued for human approval
-    — NOT the generic multi-task decomposition. Returns the proposal text for review/send."""
+    — NOT the generic multi-task decomposition. Returns the proposal text for review/send.
+
+    Idempotent on leadforge_lead_id: a webhook retry returns the existing proposal instead of a new
+    one (a timeout-then-retry must not send the client three proposals). The early check skips the
+    LLM cost on the common sequential retry; the unique index + IntegrityError catch is the real
+    guarantee under a concurrent race."""
+    existing = _existing_proposal(db, org_id, hf.leadforge_lead_id)
+    if existing is not None:
+        return _proposal_result(db, existing, idempotent=True)
+
     account, lead = _account_and_lead(db, org_id, hf)
 
     research_ctx = ""
@@ -81,9 +112,16 @@ def generate_proposal(db: Session, org_id: str, hf) -> dict:
 
     legal = review.legal_review(text)  # no prohibited claims before it can be sent
     project = Project(org_id=org_id, goal=f"Proposal for {hf.company}", account_id=account.id,
-                      status="active", health="on_track")
+                      status="active", health="on_track", leadforge_lead_id=hf.leadforge_lead_id)
     db.add(project)
-    db.flush()
+    try:
+        db.flush()  # unique (org_id, leadforge_lead_id) — a concurrent duplicate raises here
+    except IntegrityError:
+        db.rollback()  # the other request won the race; drop our account/lead/proposal work
+        existing = _existing_proposal(db, org_id, hf.leadforge_lead_id)
+        if existing is not None:
+            return _proposal_result(db, existing, idempotent=True)
+        raise  # collision but no row found — genuinely unexpected, don't swallow it
     task = Task(org_id=org_id, project_id=project.id, goal=f"Client proposal for {hf.company}",
                 department_id=dept.id if dept else None, assignee_actor_id=sales.id if sales else None,
                 status="blocked" if not legal.passed else "done", est_effort_hours=1.0)
@@ -94,9 +132,7 @@ def generate_proposal(db: Session, org_id: str, hf) -> dict:
                    blocked=not legal.passed, block_reason=None if legal.passed else "; ".join(legal.reasons))
     db.add(art)
     db.flush()
-    return {"account_id": account.id, "project_id": project.id, "artifact_id": art.id,
-            "proposal": text, "blocked": not legal.passed, "block_reason": art.block_reason,
-            "researched": bool(research_ctx)}
+    return _proposal_result(db, project, researched=bool(research_ctx))
 
 
 def ingest_handoff(db: Session, org_id: str, hf) -> tuple[Account, Lead, Project, list]:
