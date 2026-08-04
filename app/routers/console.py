@@ -62,4 +62,6 @@ def standup(db: Session = Depends(get_db), p: Principal = Depends(current_princi
 
 @router.get("/console")
 def console_page():
-    return FileResponse(_HTML_PATH, media_type="text/html")
+    # no-cache so browsers never serve a stale console after an update
+    return FileResponse(_HTML_PATH, media_type="text/html",
+                        headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
