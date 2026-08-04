@@ -36,3 +36,14 @@ def leadforge_handoff(body: LeadForgeHandoff, db: Session = Depends(get_db),
         account_id=account.id, lead_id=lead.id, project_id=project.id,
         project_status=project.status, tasks=[_task_out(t) for t in tasks],
     )
+
+
+@router.post("/integrations/leadforge/proposal")
+def leadforge_proposal(body: LeadForgeHandoff, db: Session = Depends(get_db),
+                       p: Principal = Depends(leadforge_principal)) -> dict:
+    """Generate ONE client-ready proposal for a prospect (grounded in signals + web research,
+    Legal-checked, queued for human approval). This is the 'run one real deal' path — the actual
+    document to review and send back through LeadForge."""
+    result = integrations.generate_proposal(db, p.org_id, body)
+    db.commit()
+    return result

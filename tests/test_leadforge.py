@@ -107,6 +107,17 @@ def test_webhook_secret_auth_end_to_end():
         application.dependency_overrides.clear()
 
 
+def test_proposal_path_produces_one_reviewed_proposal(db):
+    from app.models import Artifact
+    org_id = _org(db)
+    out = integrations.generate_proposal(db, org_id, _dubai_handoff())
+    db.commit()
+    assert "proposal" in out and out["proposal"]           # a single proposal document, not a task list
+    assert out["blocked"] is False                          # no prohibited claims
+    art = db.get(Artifact, out["artifact_id"])
+    assert art.type == "proposal" and art.needs_human is True  # queued for human approval before send
+
+
 def test_second_handoff_reuses_account(db):
     org_id = _org(db)
     integrations.ingest_handoff(db, org_id, _dubai_handoff())
