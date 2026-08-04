@@ -57,12 +57,16 @@ def critic_review(content: str, acceptance_criteria: str, playbook: str) -> Verd
     return Verdict(True, [])
 
 
-# Words an outbound artifact must not contain — the Legal deterministic block rule.
+# A deliberately small keyword screen — NOT a substitute for legal/compliance review. It catches a
+# few obviously-unsendable phrases; the human approval gate (see integrations.proposal_view /
+# approve_proposal) is what actually clears anything for sending. Grow this list, or swap in an LLM
+# compliance check, if the stakes rise.
 PROHIBITED_MARKERS = ("PROHIBITED", "guaranteed returns", "no risk")
 
 
 def legal_review(content: str) -> Verdict:
-    """Block (veto) when the artifact contains a prohibited marker. Human-override only."""
+    """Coarse keyword screen: veto when the content contains a prohibited marker. This is a safety
+    net, not a real legal review — a human must still approve a proposal before anything is sent."""
     hits = [m for m in PROHIBITED_MARKERS if m.lower() in (content or "").lower()]
     if hits:
         return Verdict(False, [f"prohibited content: {', '.join(hits)}"])
