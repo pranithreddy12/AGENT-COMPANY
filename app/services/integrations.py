@@ -44,18 +44,68 @@ def _account_and_lead(db: Session, org_id: str, hf):
     return account, lead
 
 
+def _proposal_artifact(db: Session, project: Project) -> Artifact | None:
+    """The single proposal Artifact for a proposal Project (via its Task). None while still
+    'generating' or if generation failed."""
+    task = db.scalars(select(Task).where(Task.project_id == project.id)).first()
+    return db.scalars(select(Artifact).where(Artifact.task_id == task.id, Artifact.type == "proposal")
+                      ).first() if task else None
+
+
 def _proposal_result(db: Session, project: Project, *, idempotent: bool = False,
                      researched: bool = False) -> dict:
     """Rebuild the proposal response from a stored proposal Project (its Task -> Artifact). One shape
     whether the proposal was just generated or returned from a dedup hit."""
-    task = db.scalars(select(Task).where(Task.project_id == project.id)).first()
-    art = db.scalars(select(Artifact).where(Artifact.task_id == task.id, Artifact.type == "proposal")
-                     ).first() if task else None
+    art = _proposal_artifact(db, project)
     return {"account_id": project.account_id, "project_id": project.id,
             "artifact_id": art.id if art else None,
             "proposal": art.content if art else "", "blocked": bool(art and art.blocked),
             "block_reason": art.block_reason if art else None,
             "researched": researched, "idempotent": idempotent}
+
+
+def _proposal_project(db: Session, org_id: str, proposal_id: str) -> Project | None:
+    """Fetch a proposal Project scoped to the org, or None if it isn't one. A regular delivery
+    project (no proposal artifact and not in a proposal-generation status) is not a proposal."""
+    project = db.scalars(select(Project).where(Project.org_id == org_id, Project.id == proposal_id)).first()
+    if project is None:
+        return None
+    if _proposal_artifact(db, project) is None and project.status not in ("generating", "failed"):
+        return None
+    return project
+
+
+def proposal_view(db: Session, org_id: str, proposal_id: str) -> dict | None:
+    """What LeadForge (or a human) sees when fetching a proposal. Releases the proposal TEXT only
+    once a human has approved it AND it isn't Legal-blocked — this is the real send gate. Otherwise
+    returns status only. None if there's no such proposal in this org."""
+    project = _proposal_project(db, org_id, proposal_id)
+    if project is None:
+        return None
+    art = _proposal_artifact(db, project)
+    approved = bool(art and art.status == "approved" and not art.blocked)
+    out = {"proposal_id": project.id, "status": project.status, "ready": approved,
+           "blocked": bool(art and art.blocked), "block_reason": art.block_reason if art else None}
+    if approved:
+        out["proposal"] = art.content  # the ONLY place sendable text leaves the system
+    return out
+
+
+def approve_proposal(db: Session, org_id: str, proposal_id: str) -> dict | None:
+    """Human approval: clears needs_human and marks the proposal approved so its text can be fetched
+    and sent. Refuses a Legal-blocked proposal (override the veto first) and one still generating.
+    None if there's no such proposal in this org."""
+    project = _proposal_project(db, org_id, proposal_id)
+    if project is None:
+        return None
+    art = _proposal_artifact(db, project)
+    if art is None:
+        return {"error": "not_ready"}  # still generating / failed — nothing to approve yet
+    if art.blocked:
+        return {"error": "blocked", "block_reason": art.block_reason}  # override the Legal veto first
+    art.needs_human, art.status = False, "approved"
+    project.status = "approved"
+    return {"proposal_id": project.id, "status": "approved", "ready": True}
 
 
 def _existing_proposal(db: Session, org_id: str, leadforge_lead_id: str | None) -> Project | None:

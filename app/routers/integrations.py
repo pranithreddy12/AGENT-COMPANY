@@ -2,7 +2,7 @@
 import secrets as pysecrets
 import threading
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, hash_secret, leadforge_principal, require_role
@@ -54,3 +54,33 @@ def leadforge_proposal(body: LeadForgeHandoff, db: Session = Depends(get_db),
         threading.Thread(target=integrations.run_proposal_in_background,
                          args=(project_id, body), daemon=True).start()
     return {"proposal_id": project_id, "status": status, "idempotent": not is_new}
+
+
+@router.get("/proposals/{proposal_id}")
+def get_proposal(proposal_id: str, db: Session = Depends(get_db),
+                 p: Principal = Depends(leadforge_principal)) -> dict:
+    """Fetch a proposal by id (LeadForge via secret, or a ceo/dept_head via Bearer). Returns status
+    only while generating / awaiting approval; releases the proposal TEXT only once a human has
+    approved it and it isn't Legal-blocked. This is the send gate — LeadForge can't get sendable
+    text until a human clears it."""
+    view = integrations.proposal_view(db, p.org_id, proposal_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="proposal not found")
+    return view
+
+
+@router.post("/proposals/{proposal_id}/approve")
+def approve_proposal(proposal_id: str, db: Session = Depends(get_db),
+                     p: Principal = Depends(require_role("ceo", "dept_head"))) -> dict:
+    """Human-only: approve a generated proposal so its text can be fetched and sent. No webhook-secret
+    path — a machine can't self-approve. Refuses a proposal still generating (409) or Legal-blocked
+    (409; override the veto first)."""
+    result = integrations.approve_proposal(db, p.org_id, proposal_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="proposal not found")
+    if result.get("error") == "not_ready":
+        raise HTTPException(status_code=409, detail="proposal not generated yet")
+    if result.get("error") == "blocked":
+        raise HTTPException(status_code=409, detail=f"Legal veto in place — override it first: {result.get('block_reason')}")
+    db.commit()
+    return result

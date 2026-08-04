@@ -191,6 +191,107 @@ def test_stuck_generating_recovered_and_retryable(db):
     assert is_new
 
 
+def test_proposal_text_released_only_after_human_approval(db):
+    """The send gate: a generated ('ready') proposal returns status but NO text until a human
+    approves; after approval the text is released."""
+    org_id = _org(db)
+    project, _ = integrations.start_proposal(db, org_id, _dubai_handoff())
+    integrations._produce_proposal_artifact(db, project, _dubai_handoff())
+    db.commit()
+
+    pre = integrations.proposal_view(db, org_id, project.id)
+    assert pre["status"] == "ready" and pre["ready"] is False and "proposal" not in pre
+
+    approved = integrations.approve_proposal(db, org_id, project.id)
+    db.commit()
+    assert approved["status"] == "approved"
+    post = integrations.proposal_view(db, org_id, project.id)
+    assert post["ready"] is True and post["status"] == "approved" and post["proposal"]
+
+
+def test_cannot_approve_or_release_legally_blocked_proposal(db):
+    """A Legal-blocked proposal can't be approved and its text is never released by the gate."""
+    hf = _dubai_handoff()
+    hf.signals = [LeadForgeSignal(signal="we promise guaranteed returns to every client", source="x")]
+    org_id = _org(db)
+    project, _ = integrations.start_proposal(db, org_id, hf)
+    integrations._produce_proposal_artifact(db, project, hf)
+    db.commit()
+
+    art = integrations._proposal_artifact(db, project)
+    assert art.blocked is True  # echoed proposal contains "guaranteed returns" -> Legal veto
+
+    assert integrations.approve_proposal(db, org_id, project.id)["error"] == "blocked"
+    view = integrations.proposal_view(db, org_id, project.id)
+    assert view["ready"] is False and view["blocked"] is True and "proposal" not in view
+
+
+def test_proposal_view_is_none_for_non_proposal_project(db):
+    """A regular delivery project (from /handoff) is not a proposal — the proposal API 404s on it."""
+    org_id = _org(db)
+    _a, _l, project, _t = integrations.ingest_handoff(db, org_id, _dubai_handoff())
+    db.commit()
+    assert integrations.proposal_view(db, org_id, project.id) is None
+    assert integrations.approve_proposal(db, org_id, project.id) is None
+
+
+def test_proposal_get_and_approve_over_http():
+    """End-to-end HTTP: POST returns a proposal_id (no text); GET withholds text until a ceo approves,
+    then GET releases it. Exercises the real threaded endpoint + the approval gate."""
+    import time
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    import app.models  # noqa: F401
+    from app.db import Base, get_db
+    from app.main import app as application
+    from app.services import integrations as integ_svc
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def _override():
+        s = TestingSession()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    application.dependency_overrides[get_db] = _override
+    saved_session_local = integ_svc.SessionLocal
+    integ_svc.SessionLocal = TestingSession  # background worker uses the same in-memory DB
+    client = TestClient(application)
+    try:
+        org = client.post("/orgs", json={"name": "Acme", "ceo_email": "c@a.com", "ceo_password": "pw"}).json()
+        ceo = {"authorization": f"Bearer {org['access_token']}"}
+        payload = _dubai_handoff().model_dump()
+
+        started = client.post("/integrations/leadforge/proposal", json=payload, headers=ceo).json()
+        pid = started["proposal_id"]
+        assert started["status"] == "generating" and "proposal" not in started
+
+        # wait for the background thread to finish generating
+        for _ in range(50):
+            time.sleep(0.1)
+            got = client.get(f"/proposals/{pid}", headers=ceo).json()
+            if got["status"] != "generating":
+                break
+        assert got["status"] == "ready" and got["ready"] is False and "proposal" not in got  # gate holds
+
+        approved = client.post(f"/proposals/{pid}/approve", headers=ceo)
+        assert approved.status_code == 200, approved.text
+
+        released = client.get(f"/proposals/{pid}", headers=ceo).json()
+        assert released["ready"] is True and released["status"] == "approved" and released["proposal"]
+    finally:
+        integ_svc.SessionLocal = saved_session_local
+        application.dependency_overrides.clear()
+
+
 def test_second_handoff_reuses_account(db):
     org_id = _org(db)
     integrations.ingest_handoff(db, org_id, _dubai_handoff())
