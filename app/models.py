@@ -139,6 +139,9 @@ class Project(Base):
     # existing proposal instead of a new one. NULL on every other project; SQLite treats NULLs as
     # distinct in a unique index, so the constraint only bites real lead ids.
     leadforge_lead_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # unguessable public share/accept link token, minted only when a proposal is approved. NULL means
+    # no public link exists (so unapproved/blocked proposals can never be viewed at /p/{token}).
+    accept_token: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     __table_args__ = (
@@ -352,6 +355,24 @@ class MemoryRecord(Base):
     source_actor_id: Mapped[str | None] = mapped_column(ForeignKey("actors.id"), nullable=True)
     content: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class ProposalAcceptance(Base):
+    """Immutable record that a client accepted a specific proposal version. Lightweight
+    click-to-accept (name + time + IP + a hash of the exact text signed) — an audit trail, NOT a
+    qualified e-signature. One per proposal (unique project_id enforces single acceptance)."""
+
+    __tablename__ = "proposal_acceptances"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), unique=True, index=True)
+    artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id"), nullable=True)
+    artifact_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    signer_name: Mapped[str] = mapped_column(String)
+    signer_ip: Mapped[str | None] = mapped_column(String, nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(String, nullable=True)  # binds the signature to the exact text
+    accepted_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
 class Scorecard(Base):

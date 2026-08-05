@@ -40,6 +40,8 @@ def _migrate_sqlite() -> None:
         cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(projects)")}
         if "leadforge_lead_id" not in cols:
             conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN leadforge_lead_id VARCHAR")
+        if "accept_token" not in cols:
+            conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN accept_token VARCHAR")
         conn.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_projects_org_leadforge "
             "ON projects (org_id, leadforge_lead_id)"

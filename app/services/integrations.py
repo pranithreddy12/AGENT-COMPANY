@@ -7,13 +7,18 @@ generic. Nothing is sent automatically — a proposal passes a coarse keyword sc
 must approve it before LeadForge can fetch and send the text (see proposal_view / approve_proposal),
 matching LeadForge's own human-in-the-loop model.
 """
+import hashlib
+import secrets as pysecrets
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import Account, Actor, AgentProfile, Artifact, Contact, Department, Lead, Project, Task
+from app.models import (
+    Account, Actor, AgentProfile, Artifact, Contact, Department, Lead, Project, ProposalAcceptance, Task,
+)
 from app.services import llm, planning, research, review
 
 _PROPOSAL_SYSTEM = (
@@ -76,26 +81,36 @@ def _proposal_project(db: Session, org_id: str, proposal_id: str) -> Project | N
     return project
 
 
+def _acceptance(db: Session, project: Project) -> ProposalAcceptance | None:
+    return db.scalars(select(ProposalAcceptance).where(ProposalAcceptance.project_id == project.id)).first()
+
+
 def proposal_view(db: Session, org_id: str, proposal_id: str) -> dict | None:
     """What LeadForge (or a human) sees when fetching a proposal. Releases the proposal TEXT only
     once a human has approved it AND it isn't Legal-blocked — this is the real send gate. Otherwise
-    returns status only. None if there's no such proposal in this org."""
+    returns status only. Also reports the share link + acceptance status. None if there's no such
+    proposal in this org."""
     project = _proposal_project(db, org_id, proposal_id)
     if project is None:
         return None
     art = _proposal_artifact(db, project)
-    approved = bool(art and art.status == "approved" and not art.blocked)
-    out = {"proposal_id": project.id, "status": project.status, "ready": approved,
-           "blocked": bool(art and art.blocked), "block_reason": art.block_reason if art else None}
-    if approved:
+    released = bool(art and art.status == "approved" and not art.blocked)  # stays true once accepted
+    acc = _acceptance(db, project)
+    out = {"proposal_id": project.id, "status": project.status, "ready": released,
+           "blocked": bool(art and art.blocked), "block_reason": art.block_reason if art else None,
+           "share_token": project.accept_token, "accepted": acc is not None,
+           "accepted_by": acc.signer_name if acc else None,
+           "accepted_at": acc.accepted_at.isoformat() if acc else None}
+    if released:
         out["proposal"] = art.content  # the ONLY place sendable text leaves the system
     return out
 
 
 def approve_proposal(db: Session, org_id: str, proposal_id: str) -> dict | None:
-    """Human approval: clears needs_human and marks the proposal approved so its text can be fetched
-    and sent. Refuses a Legal-blocked proposal (override the veto first) and one still generating.
-    None if there's no such proposal in this org."""
+    """Human approval: clears needs_human, marks the proposal approved, and mints the unguessable
+    public share/accept token so the client can view + sign it. Refuses a Legal-blocked proposal
+    (override the veto first) and one still generating. Idempotent — re-approving (or approving an
+    already-accepted one) keeps the same token. None if there's no such proposal in this org."""
     project = _proposal_project(db, org_id, proposal_id)
     if project is None:
         return None
@@ -104,9 +119,61 @@ def approve_proposal(db: Session, org_id: str, proposal_id: str) -> dict | None:
         return {"error": "not_ready"}  # still generating / failed — nothing to approve yet
     if art.blocked:
         return {"error": "blocked", "block_reason": art.block_reason}  # override the Legal veto first
-    art.needs_human, art.status = False, "approved"
-    project.status = "approved"
-    return {"proposal_id": project.id, "status": "approved", "ready": True}
+    if project.status != "accepted":  # never revert a signed proposal
+        art.needs_human, art.status = False, "approved"
+        project.status = "approved"
+    if not project.accept_token:
+        project.accept_token = pysecrets.token_urlsafe(32)  # 256-bit, unguessable; the only gate on /p/{token}
+    return {"proposal_id": project.id, "status": project.status, "ready": True,
+            "accept_token": project.accept_token}
+
+
+def public_proposal(db: Session, token: str) -> tuple[Project, Artifact, ProposalAcceptance | None] | None:
+    """Resolve a public share token to (project, artifact, acceptance) for the /p/{token} client view.
+    None if the token is unknown or the proposal isn't releasable (only approved/accepted, non-blocked
+    proposals are ever viewable — unapproved ones never get a token in the first place)."""
+    if not token:
+        return None
+    project = db.scalars(select(Project).where(Project.accept_token == token)).first()
+    if project is None or project.status not in ("approved", "accepted"):
+        return None
+    art = _proposal_artifact(db, project)
+    if art is None or art.blocked:
+        return None
+    return project, art, _acceptance(db, project)
+
+
+def accept_proposal_by_token(db: Session, token: str, signer_name: str, signer_ip: str | None) -> dict | None:
+    """Client accepts (signs) the proposal via its public token. Idempotent — a second accept returns
+    the existing signature, never a second row (unique project_id). None if the token is unknown/not
+    releasable; {'error': 'empty_name'} if no signer name given."""
+    pv = public_proposal(db, token)
+    if pv is None:
+        return None
+    project, art, acc = pv
+    if acc is not None:  # already signed
+        return {"accepted": True, "idempotent": True, "proposal_id": project.id,
+                "signer_name": acc.signer_name, "accepted_at": acc.accepted_at.isoformat()}
+    if not (signer_name or "").strip():
+        return {"error": "empty_name"}
+    content = art.content or ""
+    row = ProposalAcceptance(
+        org_id=project.org_id, project_id=project.id, artifact_id=art.id, artifact_version=art.version,
+        signer_name=signer_name.strip(), signer_ip=signer_ip,
+        content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest())
+    db.add(row)
+    project.status = "accepted"
+    try:
+        db.flush()  # unique project_id — a concurrent double-accept raises here
+    except IntegrityError:
+        db.rollback()  # the other request signed first; return theirs
+        acc = _acceptance(db, project)
+        if acc is None:
+            raise
+        return {"accepted": True, "idempotent": True, "proposal_id": project.id,
+                "signer_name": acc.signer_name, "accepted_at": acc.accepted_at.isoformat()}
+    return {"accepted": True, "idempotent": False, "proposal_id": project.id,
+            "signer_name": row.signer_name, "accepted_at": row.accepted_at.isoformat()}
 
 
 def _existing_proposal(db: Session, org_id: str, leadforge_lead_id: str | None) -> Project | None:

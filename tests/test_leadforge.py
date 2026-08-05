@@ -312,6 +312,117 @@ def test_generation_failure_marks_failed_and_frees_slot(db):
     assert is_new
 
 
+def _approved_proposal(db, org_id):
+    """Helper: a generated + approved proposal, returns (project, share_token)."""
+    project, _ = integrations.start_proposal(db, org_id, _dubai_handoff())
+    integrations._produce_proposal_artifact(db, project, _dubai_handoff())
+    db.commit()
+    token = integrations.approve_proposal(db, org_id, project.id)["accept_token"]
+    db.commit()
+    return project, token
+
+
+def test_approve_mints_share_token_and_public_view_releases_text(db):
+    org_id = _org(db)
+    project, token = _approved_proposal(db, org_id)
+    assert token and project.accept_token == token
+    pv = integrations.public_proposal(db, token)
+    assert pv is not None
+    _proj, art, acc = pv
+    assert acc is None and art.content and not art.blocked
+    assert integrations.public_proposal(db, "not-a-real-token") is None  # unknown token -> nothing
+
+
+def test_public_accept_records_signature_and_is_idempotent(db):
+    from app.models import ProposalAcceptance
+    org_id = _org(db)
+    project, token = _approved_proposal(db, org_id)
+
+    r1 = integrations.accept_proposal_by_token(db, token, "Jane Owner", "1.2.3.4")
+    db.commit()
+    assert r1["accepted"] is True and r1["idempotent"] is False
+    db.refresh(project)
+    assert project.status == "accepted"
+    rows = list(db.scalars(select(ProposalAcceptance).where(ProposalAcceptance.project_id == project.id)))
+    assert len(rows) == 1 and rows[0].signer_name == "Jane Owner" and rows[0].content_sha256
+
+    # a second accept (double-click, or a different name) returns the FIRST signature, no new row
+    r2 = integrations.accept_proposal_by_token(db, token, "Someone Else", "9.9.9.9")
+    db.commit()
+    assert r2["idempotent"] is True and r2["signer_name"] == "Jane Owner"
+    assert len(list(db.scalars(select(ProposalAcceptance).where(ProposalAcceptance.project_id == project.id)))) == 1
+    # an accepted proposal is still viewable (text stays released)
+    assert integrations.proposal_view(db, org_id, project.id)["accepted"] is True
+
+
+def test_accept_rejects_empty_name_and_unknown_token(db):
+    org_id = _org(db)
+    _project, token = _approved_proposal(db, org_id)
+    assert integrations.accept_proposal_by_token(db, token, "   ", "1.1.1.1")["error"] == "empty_name"
+    assert integrations.accept_proposal_by_token(db, "bogus-token", "Jane", None) is None
+
+
+def test_unapproved_proposal_has_no_public_link(db):
+    """A generated-but-not-approved proposal never gets a token, so its text can't leak via /p."""
+    org_id = _org(db)
+    project, _ = integrations.start_proposal(db, org_id, _dubai_handoff())
+    integrations._produce_proposal_artifact(db, project, _dubai_handoff())
+    db.commit()
+    assert project.accept_token is None
+
+
+def test_public_accept_page_and_form_over_http():
+    """End-to-end HTTP through the real client page: GET /p/{token} renders the proposal + accept form,
+    a bad token 404s, an empty name 400s, and POSTing a name flips the deal to accepted."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    import app.models  # noqa: F401
+    from app.db import Base, get_db
+    from app.main import app as application
+    from app.models import Project
+    from app.services import integrations as isvc
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def _override():
+        s = TestingSession()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    application.dependency_overrides[get_db] = _override
+    client = TestClient(application)
+    try:
+        s = TestingSession()
+        org_id = create_org(OrgCreate(name="Acme", ceo_email="c@a.com", ceo_password="pw"), s).org_id
+        out = isvc.generate_proposal(s, org_id, _dubai_handoff())
+        s.commit()
+        isvc.approve_proposal(s, org_id, out["project_id"])
+        s.commit()
+        token = s.get(Project, out["project_id"]).accept_token
+        s.close()
+
+        page = client.get(f"/p/{token}")
+        assert page.status_code == 200 and "Accept proposal" in page.text  # form present, not yet signed
+
+        assert client.get("/p/nope").status_code == 404  # unknown token
+
+        empty = client.post(f"/p/{token}/accept", data={"signer_name": "  "})
+        assert empty.status_code == 400 and "type your name" in empty.text.lower()
+
+        signed = client.post(f"/p/{token}/accept", data={"signer_name": "Jane Owner"})  # follows redirect
+        assert signed.status_code == 200 and "Accepted by Jane Owner" in signed.text
+        assert "Accept proposal" not in signed.text  # form gone once signed
+    finally:
+        application.dependency_overrides.clear()
+
+
 def test_second_handoff_reuses_account(db):
     org_id = _org(db)
     integrations.ingest_handoff(db, org_id, _dubai_handoff())
