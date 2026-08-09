@@ -39,10 +39,13 @@ curl -sX POST localhost:8000/tasks/$TID/slip -H "authorization: Bearer $TOKEN" \
 
 ## Run it
 
-```bash
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
+**Windows:** Double-click `startup.bat` in the repo root.
+
+**macOS/Linux:** Run `chmod +x startup.sh && ./startup.sh`
+
+**Manual:** See [STARTUP.md](STARTUP.md) for full setup, environment variables, and troubleshooting.
+
+The server starts on `http://127.0.0.1:8000`. Open the CEO console at `http://127.0.0.1:8000/console`.
 
 Then drive the Phase 0 gate (create a tenant → run the demo agent → read its trace):
 
