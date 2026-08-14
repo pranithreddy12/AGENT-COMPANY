@@ -1,5 +1,10 @@
 # Company OS (repo: AGENT-COMPANY) — Project Status
 
+> **STALE — see [`plan.md`](../plan.md) in the repo root for current state.**
+> This file describes HEAD `2043b63` / 75 tests / port 8000 / the old token-paste console.
+> Since then: client accept + e-sign, team chat (@mention → real task), email/password console
+> login, and the tool-registry findings. `plan.md` supersedes this document.
+
 **One line:** a multi-tenant platform where an AI-staffed company (named agents across 6 departments,
 coordinated by a Lead, reviewed by a Critic, gated by governance) turns a CEO goal into a task DAG,
 executes it, and produces reviewed deliverables — with a web console to run and watch it.
