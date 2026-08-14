@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from app.db import SessionLocal, init_db
 from app.routers import (
     console, crm, governance, health, human, integrations, intelligence, orgs, portal, projects,
-    runs, voice,
+    runs, teamchat, voice,
 )
 
 
@@ -53,3 +53,4 @@ app.include_router(portal.router)
 app.include_router(voice.router)
 app.include_router(intelligence.router)
 app.include_router(integrations.router)
+app.include_router(teamchat.router)
