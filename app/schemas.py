@@ -139,6 +139,8 @@ class ApprovalOut(BaseModel):
     preview: str
     status: str
     requested_by_actor_id: str | None
+    department_id: str | None
+    created_at: datetime
     decision_reason: str | None
 
 

@@ -39,7 +39,8 @@ def approvals(status: str = "pending", db: Session = Depends(get_db),
     q = select(ApprovalRequest).where(ApprovalRequest.org_id == p.org_id, ApprovalRequest.status == status)
     return [
         ApprovalOut(id=a.id, action_type=a.action_type, preview=a.preview, status=a.status,
-                    requested_by_actor_id=a.requested_by_actor_id, decision_reason=a.decision_reason)
+                    requested_by_actor_id=a.requested_by_actor_id, department_id=a.department_id,
+                    created_at=a.created_at, decision_reason=a.decision_reason)
         for a in db.scalars(q)
     ]
 
