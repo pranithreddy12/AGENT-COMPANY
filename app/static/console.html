@@ -97,11 +97,17 @@
 
   main{min-width:0;display:flex;flex-direction:column}
   .topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:16px;padding:22px 34px 10px;
-    background:color-mix(in srgb, var(--bg) 85%, transparent);backdrop-filter:blur(10px)}
+    background:color-mix(in srgb, var(--bg) 85%, transparent);backdrop-filter:blur(10px);flex:0 0 auto}
   .topbar h1{margin:0;font-size:23px;font-weight:750;letter-spacing:-.015em}
   .topbar .sub{color:var(--text3);font-size:13.3px;margin-top:2px}
   .spacer{flex:1}
   .content{padding:14px 34px 60px;max-width:1280px;width:100%}
+
+  /* full-screen chat: the teamchat route fills the viewport instead of the normal scrolling page */
+  body.is-teamchat{overflow:hidden}
+  body.is-teamchat main{height:100vh}
+  body.is-teamchat .content{flex:1;min-height:0;overflow:hidden;padding:16px 24px;max-width:none}
+  body.is-teamchat .tc-shell{height:100%}
 
   .search{display:flex;align-items:center;gap:9px;background:var(--surface);border:1px solid var(--border);
     border-radius:var(--r-pill);padding:10px 15px;width:280px;color:var(--text3);cursor:text;transition:.12s}
@@ -1067,6 +1073,7 @@ async function _render(){
   const hash=location.hash.replace('#/','')||'dashboard';
   const [k,arg]=hash.split('/');
   document.querySelectorAll('#nav a').forEach(a=>a.classList.toggle('active',a.dataset.k===k));
+  document.body.classList.toggle('is-teamchat', k==='teamchat');   // team chat fills the viewport; every other route scrolls normally
   try{ if(k==='project') await V.project(arg); else await (V[k]||V.dashboard)(); }
   catch(e){ if(e.status!==401) document.getElementById('view').innerHTML=`<div class="panel">${empty('Error '+(e.status||'')+': '+esc(e.detail||'request failed'))}</div>`; }
 }
