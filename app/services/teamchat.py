@@ -115,13 +115,20 @@ def run_chat_task_in_background(task_id: str) -> None:
         db.close()
 
 
+_MAX_CHAT_REPLY = 8000  # generous headroom over a typical ~3000-token deliverable; guards only pathological output
+
+
 def _summary(art: Artifact) -> str:
-    """What the agent says back in chat: flags first, then the work itself."""
+    """What the agent says back in chat: flags first, then the work itself. The chat UI renders this
+    as markdown and lets the human expand long replies, so this only needs to protect against a truly
+    runaway artifact — not clip normal deliverables."""
     if art.blocked:
         return f"Legal blocked this: {art.block_reason}. Nothing sent — a human needs to clear it."
     head = "Done — needs a human review before it goes anywhere.\n\n" if art.needs_human else "Done.\n\n"
     body = (art.content or "").strip()
-    return head + (body if len(body) <= 1500 else body[:1500] + "\n\n[...truncated — open the artifact for the full text]")
+    if len(body) > _MAX_CHAT_REPLY:
+        body = body[:_MAX_CHAT_REPLY] + "\n\n*(cut off — this artifact ran unusually long)*"
+    return head + body
 
 
 def _reply(db: Session, org_id: str, agent: Actor | None, content: str) -> None:

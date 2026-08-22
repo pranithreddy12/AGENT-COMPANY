@@ -293,9 +293,22 @@
   .chatmsg.me .chat-col{align-items:flex-end}
   .chat-meta{font-size:11.5px;margin-bottom:4px;color:var(--text3)}
   .chat-meta b{color:var(--text2);font-weight:650}
-  .chatbody{white-space:pre-wrap;line-height:1.58;background:var(--surface2);border:1px solid var(--border);
+  .chatbody{line-height:1.58;background:var(--surface2);border:1px solid var(--border);
     border-radius:4px 14px 14px 14px;padding:11px 15px;font-size:13.8px}
   .chatmsg.me .chatbody{background:var(--ink);color:#fbf9f4;border:none;border-radius:14px 4px 14px 14px}
+  .chatbody .md-h{font-weight:700;font-size:1.03em;margin:11px 0 4px}
+  .chatbody .md-h:first-child{margin-top:0}
+  .chatbody ul,.chatbody ol{margin:6px 0 9px;padding-left:20px}
+  .chatbody li{margin:3px 0}
+  .chatbody code{background:rgba(127,127,127,.18);padding:1px 5px;border-radius:4px;
+    font:12.4px ui-monospace,SFMono-Regular,Menlo,monospace}
+  .chatbody hr{border:none;border-top:1px solid currentColor;opacity:.2;margin:11px 0}
+  .chatbody.clamped{max-height:230px;overflow:hidden;position:relative}
+  .chatbody.clamped::after{content:"";position:absolute;left:0;right:0;bottom:0;height:52px;
+    background:linear-gradient(transparent,var(--surface2))}
+  .chatmsg.me .chatbody.clamped::after{background:linear-gradient(transparent,var(--ink))}
+  .chat-expand{display:inline-block;margin-top:7px;font-size:12px;font-weight:700;color:var(--blue);cursor:pointer}
+  .chat-expand:hover{text-decoration:underline}
   .av-blue{background:var(--blue)} .av-green{background:var(--green)} .av-purple{background:var(--purple)}
   .av-amber{background:var(--amber)} .av-red{background:var(--red)} .av-gold{background:var(--gold)}
 
@@ -561,14 +574,59 @@ function deptColor(name){
   let h=0; for(let i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))>>>0;
   return DEPT_PALETTE[h%DEPT_PALETTE.length];
 }
+// Small, deliberately non-exhaustive markdown renderer for agent replies (headings, bold/italic,
+// inline code, bullet/numbered lists, hr, paragraph breaks). Escapes first so nothing in the
+// content — human-typed or model-generated — can inject real HTML; only the tags we add below exist.
+function mdToHtml(raw){
+  let s = esc(raw||'');
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<i>$2</i>');
+  s = s.replace(/^#{1,6}\s+(.*)$/gm, '<div class="md-h">$1</div>');
+  s = s.replace(/^-{3,}$/gm, '<hr>');
+  // build with '' as the join separator (not '\n') — list tags must NOT get a synthetic line break
+  // around them; only plain-text lines carry their own trailing <br>, so line breaks stay exactly
+  // where the original content had them.
+  const lines = s.split('\n'); const out = []; let inUl=false, inOl=false;
+  for(const line of lines){
+    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+\.\s+(.*)$/.exec(line);
+    if(bullet){
+      if(inOl){ out.push('</ol>'); inOl=false; }
+      if(!inUl){ out.push('<ul>'); inUl=true; }
+      out.push('<li>'+bullet[1]+'</li>');
+    }else if(numbered){
+      if(inUl){ out.push('</ul>'); inUl=false; }
+      if(!inOl){ out.push('<ol>'); inOl=true; }
+      out.push('<li>'+numbered[1]+'</li>');
+    }else{
+      if(inUl){ out.push('</ul>'); inUl=false; }
+      if(inOl){ out.push('</ol>'); inOl=false; }
+      out.push(line.trim()==='' ? '<br>' : line+'<br>');
+    }
+  }
+  if(inUl) out.push('</ul>'); if(inOl) out.push('</ol>');
+  s = out.join('');
+  s = s.replace(/(<br>){2,}/g,'<br><br>');   // a blank source line + the prior line's own <br> -> one gap
+  s = s.replace(/(<\/ul>|<\/ol>|<\/div>|<hr>)(<br>)+/g,'$1').replace(/(<br>)+(<ul>|<ol>|<div class="md-h">|<hr>)/g,'$2');
+  return s.replace(/(<br>)+$/,'');   // no trailing blank line at the end of the bubble
+}
+function toggleClamp(id, btn){
+  const el=document.getElementById(id); if(!el) return;
+  el.classList.toggle('clamped');
+  btn.textContent = el.classList.contains('clamped') ? 'Show more' : 'Show less';
+}
 const chatBubble = (m) => {
   const me = !m.is_agent;
+  const long = (m.content||'').length > 600;
+  const bodyId = 'mb'+Math.random().toString(36).slice(2,9);
   return `<div class="chatmsg ${me?'me':''}">
     <div class="avatar ${me?'':deptColor(m.department)}">${esc((m.sender||'?').trim()[0]||'?')}</div>
     <div class="chat-col">
       <div class="chat-meta"><b>${esc(m.sender)}</b>${m.department?' · '+esc(m.department):''}
         <span style="opacity:.7"> · ${esc((m.at||'').slice(11,16))}</span></div>
-      <div class="chatbody">${esc(m.content)}</div>
+      <div class="chatbody ${long?'clamped':''}" id="${bodyId}">${mdToHtml(m.content)}</div>
+      ${long?`<span class="chat-expand" onclick="toggleClamp('${bodyId}',this)">Show more</span>`:''}
     </div></div>`;
 };
 
