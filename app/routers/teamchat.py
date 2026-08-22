@@ -5,8 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from sqlalchemy import select
+
 from app.auth import Principal, current_principal, require_role
 from app.db import get_db
+from app.models import Department
 from app.services import teamchat
 
 router = APIRouter(tags=["teamchat"])
@@ -19,9 +22,11 @@ class ChatPost(BaseModel):
 @router.get("/teamchat")
 def get_chat(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> dict:
     """The team chat history plus the @mentionable roster (so the UI can autocomplete)."""
+    depts = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == p.org_id))}
     return {
         "messages": teamchat.history(db, p.org_id),
-        "agents": [{"handle": teamchat.handle(a), "name": a.name or a.role}
+        "agents": [{"handle": teamchat.handle(a), "name": a.name or a.role, "role": a.role,
+                    "department": depts.get(a.department_id)}
                    for a in teamchat.roster(db, p.org_id)],
     }
 

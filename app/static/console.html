@@ -290,6 +290,62 @@
   .chatbody{white-space:pre-wrap;line-height:1.58;background:var(--surface2);border:1px solid var(--border);
     border-radius:4px 14px 14px 14px;padding:11px 15px;font-size:13.8px}
   .chatmsg.me .chatbody{background:var(--ink);color:#fbf9f4;border:none;border-radius:14px 4px 14px 14px}
+  .av-blue{background:var(--blue)} .av-green{background:var(--green)} .av-purple{background:var(--purple)}
+  .av-amber{background:var(--amber)} .av-red{background:var(--red)} .av-gold{background:var(--gold)}
+
+  /* ---- team chat: 3-column messenger layout ---- */
+  .tc-shell{display:grid;grid-template-columns:250px 1fr 270px;gap:16px;height:calc(100vh - 168px);min-height:540px}
+  .tc-col{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);box-shadow:var(--shadow);
+    display:flex;flex-direction:column;overflow:hidden;animation:rise .3s cubic-bezier(.2,.7,.3,1) both}
+  .tc-col-head{padding:16px 16px 4px}
+  .tc-col-head h3{margin:0 0 2px;font-size:13.5px;font-weight:700}
+  .tc-col-head p{margin:0;font-size:11.6px;color:var(--text3)}
+  .tc-search{margin:12px 14px 8px;display:flex;align-items:center;gap:7px;background:var(--surface2);
+    border:1px solid var(--border);border-radius:var(--r-pill);padding:7px 12px}
+  .tc-search svg{width:14px;height:14px;color:var(--text3);flex:0 0 14px}
+  .tc-search input{border:none;background:transparent;padding:0;font-size:12.6px}
+  .tc-search input:focus{box-shadow:none}
+  .roster-list{flex:1;overflow:auto;padding:4px 8px 10px}
+  .roster-row{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:10px;cursor:pointer;transition:.1s}
+  .roster-row:hover{background:var(--surface2)}
+  .roster-row .rav{width:32px;height:32px;border-radius:50%;flex:0 0 32px;display:grid;place-items:center;
+    color:#fff;font-weight:700;font-size:12.5px}
+  .roster-row .rt{flex:1;min-width:0}
+  .roster-row .rn{font-size:13px;font-weight:640;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .roster-row .rd{font-size:11.3px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .roster-row .rr{font-size:9.5px;font-weight:700;color:var(--text3)}
+
+  .tc-header{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border)}
+  .tc-header .thav{width:38px;height:38px;border-radius:12px;background:var(--ink);color:#fbf9f4;display:grid;
+    place-items:center;flex:0 0 38px}
+  .tc-header .thav svg{width:18px;height:18px}
+  .tc-header h3{margin:0;font-size:14.5px;font-weight:700}
+  .tc-header p{margin:1px 0 0;font-size:11.8px;color:var(--text3)}
+  .tc-messages{flex:1;overflow:auto;padding:18px 20px}
+  .tc-composer-area{border-top:1px solid var(--border);padding:14px 18px 12px}
+  .tc-composer-row{display:flex;gap:9px;align-items:center}
+  .tc-composer-row input{border-radius:var(--r-pill);padding:11px 16px}
+  .tc-send{width:40px;height:40px;border-radius:50%;background:var(--ink);color:#fbf9f4;border:none;
+    display:grid;place-items:center;cursor:pointer;flex:0 0 40px;transition:.12s}
+  .tc-send:hover{background:var(--ink2)}
+  .tc-send svg{width:15px;height:15px}
+  #chat-hint{margin-top:8px;font-size:11.5px;min-height:14px}
+
+  .tc-right{overflow-y:auto;padding:16px}
+  .tc-block{margin-bottom:20px}
+  .tc-block:last-child{margin-bottom:0}
+  .tc-block h4{margin:0 0 9px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3)}
+  .tc-block p{margin:0;font-size:12.6px;color:var(--text2);line-height:1.6}
+  .tc-stat-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;font-size:12.6px;
+    border-top:1px solid var(--border)}
+  .tc-stat-row:first-child{border-top:none}
+  .tc-stat-row .sn{color:var(--text2);display:flex;align-items:center;gap:8px}
+  .tc-stat-row .sv{font-weight:700;color:var(--text)}
+  .tc-tip{background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 13px;
+    font-size:11.8px;color:var(--text2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+  @media(max-width:1080px){ .tc-shell{grid-template-columns:210px 1fr;height:auto;min-height:0} .tc-right{display:none} .tc-messages{max-height:52vh} }
+  @media(max-width:760px){ .tc-shell{grid-template-columns:1fr} .tc-shell .tc-col:first-child{display:none} }
 
   #toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:9px;z-index:200}
   .toast{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);
@@ -493,10 +549,16 @@ const V = {};
 
 // ---- Team chat: assign work by @mentioning an agent ----------------------------------------
 let CHAT_POLL = null;
+const DEPT_PALETTE = ['av-blue','av-green','av-purple','av-amber','av-red','av-gold'];
+function deptColor(name){
+  if(!name) return 'av-blue';
+  let h=0; for(let i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))>>>0;
+  return DEPT_PALETTE[h%DEPT_PALETTE.length];
+}
 const chatBubble = (m) => {
   const me = !m.is_agent;
   return `<div class="chatmsg ${me?'me':''}">
-    <div class="avatar">${esc((m.sender||'?').trim()[0]||'?')}</div>
+    <div class="avatar ${me?'':deptColor(m.department)}">${esc((m.sender||'?').trim()[0]||'?')}</div>
     <div class="chat-col">
       <div class="chat-meta"><b>${esc(m.sender)}</b>${m.department?' · '+esc(m.department):''}
         <span style="opacity:.7"> · ${esc((m.at||'').slice(11,16))}</span></div>
@@ -504,23 +566,70 @@ const chatBubble = (m) => {
     </div></div>`;
 };
 
+function filterRoster(){
+  const q=(document.getElementById('roster-search').value||'').toLowerCase();
+  document.querySelectorAll('#roster-list .roster-row').forEach(r=>{ r.style.display = r.dataset.q.includes(q) ? '' : 'none'; });
+}
+function mentionAgent(h){
+  const box=document.getElementById('chat-in'); if(!box) return;
+  const val=box.value;
+  box.value = (val && !/\s$/.test(val) ? val+' ' : val) + '@'+h+' ';
+  box.focus();
+}
+
 V.teamchat = async () => {
   const data = await api('GET','/teamchat');
+  const total = data.agents.length;
+  setTitle('Team chat', `${total} agent${total===1?'':'s'} · assign work by @mentioning`);
+
+  const byDept = {};
+  data.agents.forEach(a=>{ const d=a.department||'Unassigned'; byDept[d]=(byDept[d]||0)+1; });
+  const deptRows = Object.entries(byDept).sort((a,b)=>b[1]-a[1]);
+
   const el = document.getElementById('view'); el.innerHTML='';
-  const handles = data.agents.map(a=>'@'+a.handle).join(' ');
-  el.append($(`<div class="panel"><div class="h-row"><h2>Team chat</h2></div>
-    <div class="faint" style="margin-bottom:14px;margin-top:-8px">Assign work by @mentioning an agent — it creates a
-      real task, runs it through Critic + Legal, and posts the result back here.<br>
-      Roster: <b style="color:var(--text2)">${esc(handles)}</b></div>
-    <div id="chatlog" style="max-height:54vh;overflow:auto;padding-right:6px">
-      ${data.messages.length?data.messages.map(chatBubble).join('')
-        :empty('No messages yet. Try: <b>@cleo draft a proposal for the BizBuySell scrape</b>')}
+  el.append($(`<div class="tc-shell">
+    <div class="tc-col">
+      <div class="tc-col-head"><h3>Agents</h3><p>${total} in this org</p></div>
+      <div class="tc-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input id="roster-search" placeholder="Filter agents…" oninput="filterRoster()"></div>
+      <div class="roster-list" id="roster-list">
+        ${data.agents.map(a=>`<div class="roster-row" data-q="${esc((a.name+' '+(a.department||'')).toLowerCase())}" onclick="mentionAgent('${esc(a.handle)}')" title="Click to @mention">
+          <span class="rav ${deptColor(a.department)}">${esc((a.name||'?').trim()[0]||'?')}</span>
+          <span class="rt"><div class="rn">${esc(a.name)}</div><div class="rd">${esc(a.department||'—')}</div></span>
+          <span class="rr">@${esc(a.handle)}</span>
+        </div>`).join('')}
+      </div>
     </div>
-    <div class="row" style="margin-top:16px;gap:8px">
-      <input id="chat-in" placeholder="@cleo draft a proposal for…" style="flex:1">
-      <button class="btn btn-primary" onclick="sendChat()">Send</button>
+
+    <div class="tc-col">
+      <div class="tc-header">
+        <span class="thav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></span>
+        <span><h3>Team chat</h3><p>@mention an agent to assign it real work</p></span>
+      </div>
+      <div class="tc-messages" id="chatlog">
+        ${data.messages.length?data.messages.map(chatBubble).join('')
+          :empty('No messages yet. Try: <b>@cleo draft a proposal for the BizBuySell scrape</b>')}
+      </div>
+      <div class="tc-composer-area">
+        <div class="tc-composer-row">
+          <input id="chat-in" placeholder="Message the team — @cleo draft a proposal for…" style="flex:1">
+          <button class="tc-send" onclick="sendChat()" title="Send">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg></button>
+        </div>
+        <div class="faint" id="chat-hint"></div>
+      </div>
     </div>
-    <div class="faint" id="chat-hint" style="margin-top:8px"></div></div>`));
+
+    <div class="tc-col tc-right">
+      <div class="tc-block"><h4>How it works</h4>
+        <p>@mentioning an agent creates a real task, runs it through Critic + Legal review, and posts the result back here.</p></div>
+      <div class="tc-block"><h4>Roster by department</h4>
+        ${deptRows.map(([d,n])=>`<div class="tc-stat-row"><span class="sn"><span class="rav ${deptColor(d)}" style="width:20px;height:20px;font-size:9px">${esc(d[0]||'?')}</span>${esc(d)}</span><span class="sv">${n}</span></div>`).join('')}
+      </div>
+      <div class="tc-block"><h4>Try it</h4>
+        <div class="tc-tip">@cleo draft a proposal for the BizBuySell scrape</div></div>
+    </div>
+  </div>`));
   const log = document.getElementById('chatlog'); log.scrollTop = log.scrollHeight;
   document.getElementById('chat-in').addEventListener('keydown', e=>{ if(e.key==='Enter') sendChat(); });
   document.getElementById('chat-in').focus();
