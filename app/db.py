@@ -46,6 +46,13 @@ def _migrate_sqlite() -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_projects_org_leadforge "
             "ON projects (org_id, leadforge_lead_id)"
         ))
+        org_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(organizations)")}
+        for col in ("llm_provider", "llm_model"):
+            if col not in org_cols:
+                conn.exec_driver_sql(f"ALTER TABLE organizations ADD COLUMN {col} VARCHAR")
+        if "llm_api_keys" not in org_cols:
+            # JSON column: existing rows get NULL, not '{}' — every reader treats that as "no keys yet".
+            conn.exec_driver_sql("ALTER TABLE organizations ADD COLUMN llm_api_keys TEXT")
 
 
 def init_db() -> None:

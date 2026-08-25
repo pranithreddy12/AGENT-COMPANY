@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"  # local models, no key/cost
     mistral_api_key: str | None = None  # cloud: fast + far better than local 7B
     mistral_base_url: str = "https://api.mistral.ai"
+    openrouter_api_key: str | None = None  # one key, many hosted models (OpenAI-compatible)
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
     serper_api_key: str | None = None  # web search for the Research agent
     serper_base_url: str = "https://google.serper.dev"
 

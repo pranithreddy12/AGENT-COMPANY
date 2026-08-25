@@ -56,7 +56,7 @@ def run_research(db: Session, project: Project) -> str | None:
             return None
         sources = "\n".join(f"- {r['title']}: {r['snippet']} ({r['link']})" for r in results)
         prof = db.get(AgentProfile, agent.agent_profile_id)
-        provider = llm.build_provider(prof.provider, prof.model, settings.anthropic_api_key)
+        provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, project.org_id, prof.provider))
         comp = provider.complete(
             system=_RESEARCH_SYSTEM,
             messages=[{"role": "user", "content": f"Goal: {project.goal}\n\nWeb results:\n{sources}\n\nWrite the brief."}],

@@ -8,10 +8,9 @@ from datetime import timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models import Actor, AgentProfile, AgentRun, Artifact, Department, MemoryRecord, Playbook, Project, Task, Thread
 from app.services import cost, communication, events, playbooks, research, review, runs, scheduling
-from app.services.llm import build_provider
+from app.services.llm import build_provider, resolve_api_key
 
 MAX_REVISE_CYCLES = 2  # Critic revise loop cap -> escalate to human. Bounds the loop.
 
@@ -55,7 +54,7 @@ def draft_project(db: Session, org_id: str, goal: str, account_id: str | None = 
         raise PlanError("no departments to route to")
     default_dept = depts.get("Development") or next(iter(depts.values()))
 
-    provider = build_provider(profile.provider, profile.model, settings.anthropic_api_key)
+    provider = build_provider(profile.provider, profile.model, resolve_api_key(db, org_id, profile.provider))
     try:
         pr = provider.plan(goal=goal, departments=list(depts), max_tokens=max(profile.max_tokens, 4096))
     except Exception as e:  # fail closed
@@ -140,7 +139,7 @@ def _review(db: Session, org_id: str, critic: Actor | None, content: str, criter
     the deterministic critic. Same Verdict interface either way."""
     prof = db.get(AgentProfile, critic.agent_profile_id) if critic and critic.agent_profile_id else None
     if prof and prof.provider != "echo":
-        provider = build_provider(prof.provider, prof.model, settings.anthropic_api_key)
+        provider = build_provider(prof.provider, prof.model, resolve_api_key(db, org_id, prof.provider))
         return review.llm_critic_review(provider, content, criteria, playbook)
     return review.critic_review(content, criteria, playbook)
 

@@ -3,10 +3,9 @@ grounded in its real work (its deliverables, scorecard, and the project it's on)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models import Actor, AgentProfile, Artifact, Department, MemoryRecord, Task
 from app.services import intelligence, playbooks
-from app.services.llm import build_provider
+from app.services.llm import build_provider, resolve_api_key
 
 
 def ask_agent(db: Session, org_id: str, actor: Actor, question: str, project_id: str | None = None) -> str:
@@ -47,7 +46,7 @@ def ask_agent(db: Session, org_id: str, actor: Actor, question: str, project_id:
         + (f"\nMy department playbook:\n{pb.markdown}\n" if pb else "")
         + f"\nThe human asks: {question}"
     )
-    provider = build_provider(prof.provider, prof.model, settings.anthropic_api_key) if prof else None
+    provider = build_provider(prof.provider, prof.model, resolve_api_key(db, org_id, prof.provider)) if prof else None
     if provider is None:
         return "I have no profile configured."
     comp = provider.complete(system=system, messages=[{"role": "user", "content": user}], tools=[], max_tokens=512)

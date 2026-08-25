@@ -12,10 +12,9 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models import Actor, AgentProfile, AgentRun
 from app.services import cost, events, tools
-from app.services.llm import Completion, build_provider
+from app.services.llm import Completion, build_provider, resolve_api_key
 
 
 class RunError(Exception):
@@ -51,7 +50,7 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
         return _finish(db, run, "failed", error="actor has no agent profile")
 
     try:
-        provider = build_provider(profile.provider, profile.model, settings.anthropic_api_key)
+        provider = build_provider(profile.provider, profile.model, resolve_api_key(db, run.org_id, profile.provider))
     except Exception as e:  # fail closed
         return _finish(db, run, "failed", error=f"provider init: {e}")
 

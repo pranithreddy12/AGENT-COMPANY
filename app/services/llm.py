@@ -5,6 +5,9 @@
 """
 from dataclasses import dataclass, field
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 
 @dataclass
 class ToolCall:
@@ -277,6 +280,52 @@ class MistralProvider(OllamaProvider):
         super().__init__(model=model, base_url=base_url, timeout=timeout, api_key=api_key)
 
 
+class OpenRouterProvider(OllamaProvider):
+    """OpenRouter — one key, many hosted models behind a single OpenAI-compatible endpoint. Model
+    strings look like 'mistralai/mistral-small-3.2-24b-instruct:free' or 'anthropic/claude-3.5-sonnet'
+    (see openrouter.ai/models); the "brain" behind an agent is just whatever model string is set."""
+
+    def __init__(self, api_key: str, model: str, base_url: str, timeout: float = 60.0):
+        super().__init__(model=model, base_url=base_url, timeout=timeout, api_key=api_key)
+
+
+# provider name -> the Settings attribute holding its server-wide (.env) fallback key
+_ENV_KEY_ATTR = {"anthropic": "anthropic_api_key", "mistral": "mistral_api_key", "openrouter": "openrouter_api_key"}
+
+
+def resolve_api_key(db: Session, org_id: str, provider: str) -> str | None:
+    """The key build_provider should use for `provider`: an org-level key configured via the console
+    (Governance -> Model) takes priority over the server-wide env var, so a key entered in the UI
+    works immediately — no .env edit, no restart. Keys are stored PER PROVIDER (org.llm_api_keys),
+    never a single flat field — switching providers must never resurrect a stale key that belonged
+    to a different one. Providers needing no key (echo, ollama) always get None."""
+    if provider not in _ENV_KEY_ATTR:
+        return None
+    from app.config import settings
+    from app.models import Organization
+    org = db.get(Organization, org_id)
+    stored = (org.llm_api_keys or {}).get(provider) if org else None
+    return stored or getattr(settings, _ENV_KEY_ATTR[provider])
+
+
+def configure_org_llm(db: Session, org_id: str, provider: str, model: str, api_key: str | None) -> None:
+    """Point every agent in the org at `provider`/`model` and store its key under that provider's own
+    slot in org.llm_api_keys (the console's 'Model' settings save). A blank api_key keeps whatever
+    key that SPECIFIC provider already had (or its env var) — switching providers back and forth
+    never loses or cross-applies a key."""
+    from app.models import AgentProfile, Organization
+    org = db.get(Organization, org_id)
+    if org is None:
+        raise RuntimeError("org not found")
+    org.llm_provider, org.llm_model = provider, model
+    if api_key:
+        keys = dict(org.llm_api_keys or {})
+        keys[provider] = api_key
+        org.llm_api_keys = keys
+    for prof in db.scalars(select(AgentProfile).where(AgentProfile.org_id == org_id)):
+        prof.provider, prof.model = provider, model
+
+
 def build_provider(provider: str, model: str, api_key: str | None):
     if provider == "echo":
         return EchoProvider()
@@ -285,13 +334,15 @@ def build_provider(provider: str, model: str, api_key: str | None):
         from app.services import cost
         cost.register_free(model)  # local models are free; keeps cost.compute fail-closed for paid ones
         return OllamaProvider(model=model, base_url=settings.ollama_base_url)
-    if provider == "mistral":
+    if provider in _ENV_KEY_ATTR:
         from app.config import settings
-        if not settings.mistral_api_key:
-            raise RuntimeError("mistral provider requires MISTRAL_API_KEY")  # fail closed
-        return MistralProvider(api_key=settings.mistral_api_key, model=model, base_url=settings.mistral_base_url)
-    if provider == "anthropic":
-        if not api_key:
-            raise RuntimeError("anthropic provider requires ANTHROPIC_API_KEY")  # fail closed
-        return AnthropicProvider(api_key=api_key, model=model)
+        key = api_key or getattr(settings, _ENV_KEY_ATTR[provider])
+        if not key:
+            raise RuntimeError(f"{provider} provider requires an API key "
+                              f"(configure it in Governance, or set it in .env)")  # fail closed
+        if provider == "mistral":
+            return MistralProvider(api_key=key, model=model, base_url=settings.mistral_base_url)
+        if provider == "openrouter":
+            return OpenRouterProvider(api_key=key, model=model, base_url=settings.openrouter_base_url)
+        return AnthropicProvider(api_key=key, model=model)
     raise RuntimeError(f"unknown provider {provider!r}")

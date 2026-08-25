@@ -232,7 +232,7 @@ def _produce_proposal_artifact(db: Session, project: Project, hf) -> tuple[Artif
     sales = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.department_id == dept.id,
                                            Actor.type == "agent", Actor.role == "member")).first() if dept else None
     prof = db.get(AgentProfile, sales.agent_profile_id) if sales else None
-    provider = llm.build_provider(prof.provider, prof.model, settings.anthropic_api_key) if prof else None
+    provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, org_id, prof.provider)) if prof else None
     if provider is None:
         _fail_proposal(project)
         return None, False

@@ -987,6 +987,7 @@ V.controls = async () => {
   const appr = await api('GET','/approvals').catch(()=>[]);
   el.append($(`<div class="panel"><div class="h-row"><h2>Decision queue</h2>${appr.length?`<span class="badge" style="margin-left:9px">${appr.length}</span>`:''}</div>
     <div id="appr">${renderApprovals(appr)}</div></div>`));
+  el.append($(await llmPanel()));
   el.append($(`<div class="panel"><h2>Kill switch &amp; simulation</h2>
     <div class="kv" style="margin:14px 0">Global halt: ${s.controls.killed?badge('blocked'):badge('active')} &nbsp; Simulation: ${s.controls.simulation?badge('running'):'<span class="badge">off</span>'}</div>
     <div class="row">
@@ -1001,6 +1002,59 @@ V.controls = async () => {
     <pre class="art" id="secret" style="display:none"></pre></div>`));
   bindApprovals();
 };
+
+const MODEL_HINTS = {
+  echo: 'echo-1', ollama: 'qwen2.5:7b', mistral: 'mistral-small-latest',
+  openrouter: 'mistralai/mistral-small-3.2-24b-instruct:free', anthropic: 'claude-sonnet-5',
+};
+const PROVIDER_LABELS = {
+  echo: 'Echo — free, deterministic (testing only)', ollama: 'Ollama — local, free',
+  mistral: 'Mistral — cloud', openrouter: 'OpenRouter — cloud, many models behind one key',
+  anthropic: 'Anthropic — cloud',
+};
+async function llmPanel(){
+  const cfg = await api('GET','/settings/llm').catch(()=>null);
+  if(!cfg) return `<div class="panel"><h2>Model — the agents' brain</h2>${empty('Could not load model settings.')}</div>`;
+  const envNote = cfg.providers.filter(p=>p in cfg.env_configured)
+    .map(p=>`${esc(p)}: ${cfg.env_configured[p]?'<span style="color:var(--green)">env key set</span>':'<span class="faint">no env key</span>'}`)
+    .join(' &nbsp;·&nbsp; ');
+  return `<div class="panel"><h2>Model — the agents' brain</h2>
+    <p class="muted" style="margin:14px 0">Pick the model every agent in this org runs on. Saving here updates
+      every agent immediately — no .env edit, no restart.</p>
+    <div class="form-grid">
+      <div><label>Provider</label>
+        <select id="llm-provider" onchange="onLlmProviderChange()">
+          ${cfg.providers.map(p=>`<option value="${esc(p)}" ${cfg.provider===p?'selected':''}>${esc(PROVIDER_LABELS[p]||p)}</option>`).join('')}
+        </select></div>
+      <div><label>Model</label><input id="llm-model" value="${esc(cfg.model||'')}" placeholder="${esc(MODEL_HINTS[cfg.provider]||'model name')}"></div>
+      <div><label>API key${cfg.has_key?' (configured — leave blank to keep it)':''}</label>
+        <input id="llm-key" type="password" autocomplete="off" placeholder="${cfg.has_key?'••••••••':'sk-…'}"></div>
+    </div>
+    <div class="row" style="margin-top:14px"><button class="btn btn-primary" onclick="saveLlmSettings()">Save</button></div>
+    <div class="faint" id="llm-msg" style="margin-top:10px"></div>
+    <div class="faint" style="margin-top:12px">Currently: <b style="color:var(--text2)">${
+      cfg.provider?esc(cfg.provider)+' / '+esc(cfg.model):'not configured — each agent keeps its own default'}</b></div>
+    ${envNote?`<div class="faint" style="margin-top:6px">${envNote}</div>`:''}
+  </div>`;
+}
+function onLlmProviderChange(){
+  const provider = document.getElementById('llm-provider').value;
+  const modelInput = document.getElementById('llm-model');
+  if(!modelInput.value.trim()) modelInput.placeholder = MODEL_HINTS[provider] || 'model name';
+}
+async function saveLlmSettings(){
+  const provider = document.getElementById('llm-provider').value;
+  const model = document.getElementById('llm-model').value.trim();
+  const key = document.getElementById('llm-key').value.trim();
+  const msg = document.getElementById('llm-msg');
+  if(!model){ msg.textContent='Model is required.'; return; }
+  msg.textContent='Saving…';
+  try{
+    await api('POST','/settings/llm',{provider, model, api_key: key || null});
+    toast(`Model updated — every agent now runs on ${provider}/${model}`,'ok');
+    V.controls();
+  }catch(e){ msg.textContent='Error '+(e.status||'')+': '+(e.detail||''); }
+}
 
 V.agents = async () => {
   setTitle('Agents','the AI workforce');

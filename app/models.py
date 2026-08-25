@@ -33,6 +33,15 @@ class Organization(Base):
     simulation: Mapped[bool] = mapped_column(default=False)  # dry-run: no real side effects
     qualification_framework: Mapped[str] = mapped_column(String, default="BANT")  # BANT|MEDDIC
     webhook_secret_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # sha256 of LeadForge secret
+    # org-level LLM "brain", set from the console (Governance -> Model). None means every agent
+    # keeps whatever provider/model its AgentProfile already has, and build_provider falls back to
+    # the matching *_API_KEY env var. llm_api_keys is keyed BY PROVIDER (not a single flat key) —
+    # switching provider without re-entering a key must never silently apply the wrong provider's
+    # key. Plaintext — same trust boundary as .env (this is a local, single-operator tool); add a
+    # real secrets vault before this DB is ever shared.
+    llm_provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    llm_api_keys: Mapped[dict] = mapped_column(JSON, default=dict)  # {provider: key}
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
