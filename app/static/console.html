@@ -16,7 +16,7 @@
     --bg:#faf8f3; --surface:#ffffff; --surface2:#f5f1e8; --surface3:#efe9dc;
     --border:#ece6d8; --border2:#ddd4bf;
     --text:#17140f; --text2:#5c5648; --text3:#9b9484;
-    --ink:#181510; --ink2:#302a20;
+    --ink:#181510; --ink2:#302a20; --on-ink:#fbf9f4;
     --gold:#b9822c; --gold-soft:#faf1e0;
     --blue:#3454d1; --blue-soft:#eaeefb;
     --green:#1f8a4c; --green-soft:#e9f6ee;
@@ -32,7 +32,7 @@
     --bg:#0d0e12; --surface:#15171d; --surface2:#1b1e26; --surface3:#22252f;
     --border:#262933; --border2:#343846;
     --text:#eeefF3; --text2:#a2a6b4; --text3:#666b7a;
-    --ink:#f4f2ec; --ink2:#e7e3d7;
+    --ink:#f4f2ec; --ink2:#e7e3d7; --on-ink:#171512;
     --gold:#e0ab54; --gold-soft:#2c2415;
     --blue:#7f93f0; --blue-soft:#1c2036;
     --green:#59d68c; --green-soft:#122a1c;
@@ -129,7 +129,7 @@
   .theme-btn .moon{display:none} :root[data-theme="dark"] .theme-btn .sun{display:none} :root[data-theme="dark"] .theme-btn .moon{display:block}
 
   .new-wrap{position:relative}
-  .btn-new{display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:#fbf9f4;border:none;
+  .btn-new{display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:var(--on-ink);border:none;
     padding:10.5px 17px 10.5px 15px;border-radius:var(--r-pill);font-weight:650;font-size:13.6px;cursor:pointer;
     box-shadow:0 4px 14px rgba(20,17,10,.24)}
   .btn-new:hover{background:var(--ink2)}
@@ -234,8 +234,8 @@
     cursor:pointer;transition:.12s}
   .btn:hover{border-color:var(--text3);background:var(--surface2)}
   .btn:active{transform:translateY(1px)}
-  .btn-primary{background:var(--ink);border-color:var(--ink);color:#fbf9f4;box-shadow:0 3px 10px rgba(20,17,10,.2)}
-  .btn-primary:hover{background:var(--ink2);border-color:var(--ink2)}
+  .btn-primary{background:var(--ink);border-color:var(--ink);color:var(--on-ink);box-shadow:0 3px 10px rgba(20,17,10,.2)}
+  .btn-primary:hover{background:var(--ink2);border-color:var(--ink2);color:var(--on-ink)}
   .btn-danger{background:transparent;border-color:var(--red);color:var(--red)}
   .btn-danger:hover{background:var(--red-soft);border-color:var(--red)}
   .btn-sm{padding:7.5px 13px;font-size:12.6px;border-radius:var(--r-sm)}
@@ -288,7 +288,7 @@
   .chatmsg{display:flex;gap:11px;margin:0 0 16px;align-items:flex-start;animation:rise .22s ease both}
   .chatmsg.me{flex-direction:row-reverse}
   .avatar{width:32px;height:32px;border-radius:50%;flex:0 0 32px;display:grid;place-items:center;
-    font-weight:700;font-size:13px;background:var(--ink);color:#fff}
+    font-weight:700;font-size:13px;background:var(--ink);color:var(--on-ink)}
   .chatmsg.me .avatar{background:var(--surface3);color:var(--text)}
   .chat-col{display:flex;flex-direction:column;max-width:72%}
   .chatmsg.me .chat-col{align-items:flex-end}
@@ -296,7 +296,7 @@
   .chat-meta b{color:var(--text2);font-weight:650}
   .chatbody{line-height:1.58;background:var(--surface2);border:1px solid var(--border);
     border-radius:4px 14px 14px 14px;padding:11px 15px;font-size:13.8px}
-  .chatmsg.me .chatbody{background:var(--ink);color:#fbf9f4;border:none;border-radius:14px 4px 14px 14px}
+  .chatmsg.me .chatbody{background:var(--ink);color:var(--on-ink);border:none;border-radius:14px 4px 14px 14px}
   .chatbody .md-h{font-weight:700;font-size:1.03em;margin:11px 0 4px}
   .chatbody .md-h:first-child{margin-top:0}
   .chatbody ul,.chatbody ol{margin:6px 0 9px;padding-left:20px}
@@ -336,7 +336,7 @@
   .roster-row .rr{font-size:9.5px;font-weight:700;color:var(--text3)}
 
   .tc-header{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border)}
-  .tc-header .thav{width:38px;height:38px;border-radius:12px;background:var(--ink);color:#fbf9f4;display:grid;
+  .tc-header .thav{width:38px;height:38px;border-radius:12px;background:var(--ink);color:var(--on-ink);display:grid;
     place-items:center;flex:0 0 38px}
   .tc-header .thav svg{width:18px;height:18px}
   .tc-header h3{margin:0;font-size:14.5px;font-weight:700}
@@ -345,7 +345,7 @@
   .tc-composer-area{border-top:1px solid var(--border);padding:14px 18px 12px}
   .tc-composer-row{display:flex;gap:9px;align-items:center}
   .tc-composer-row input{border-radius:var(--r-pill);padding:11px 16px}
-  .tc-send{width:40px;height:40px;border-radius:50%;background:var(--ink);color:#fbf9f4;border:none;
+  .tc-send{width:40px;height:40px;border-radius:50%;background:var(--ink);color:var(--on-ink);border:none;
     display:grid;place-items:center;cursor:pointer;flex:0 0 40px;transition:.12s}
   .tc-send:hover{background:var(--ink2)}
   .tc-send svg{width:15px;height:15px}
@@ -387,7 +387,7 @@
   #gate .box{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:38px;
     width:min(420px,92vw);box-shadow:var(--shadow-md)}
   #gate .gate-mark{width:46px;height:46px;border-radius:13px;background:var(--ink);
-    display:grid;place-items:center;color:#fbf9f4;font-weight:800;font-size:19px;margin-bottom:18px}
+    display:grid;place-items:center;color:var(--on-ink);font-weight:800;font-size:19px;margin-bottom:18px}
   #gate h2{margin:0 0 6px;font-weight:750;font-size:23px;letter-spacing:-.01em}
   #gate p{color:var(--text2);margin:0 0 22px;font-size:13.6px}
   #gate .gate-field{margin-bottom:14px}
