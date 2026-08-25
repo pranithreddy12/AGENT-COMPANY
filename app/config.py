@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     mistral_api_key: str | None = None  # cloud: fast + far better than local 7B
     mistral_base_url: str = "https://api.mistral.ai"
     openrouter_api_key: str | None = None  # one key, many hosted models (OpenAI-compatible)
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_base_url: str = "https://openrouter.ai/api"  # OllamaProvider._chat appends /v1/chat/completions itself
     serper_api_key: str | None = None  # web search for the Research agent
     serper_base_url: str = "https://google.serper.dev"
 

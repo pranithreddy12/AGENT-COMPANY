@@ -343,6 +343,14 @@ def build_provider(provider: str, model: str, api_key: str | None):
         if provider == "mistral":
             return MistralProvider(api_key=key, model=model, base_url=settings.mistral_base_url)
         if provider == "openrouter":
+            from app.services import cost
+            # OpenRouter's model catalog is open-ended (any string the user types), so it can never
+            # be fully covered by the static RATES table, and cost.compute() fails closed on an
+            # unpriced model — which would silently turn a SUCCESSFUL completion into a reported
+            # run failure. Register it at $0 so the run completes; this is honestly NOT real pricing
+            # (OpenRouter is a paid API) — cost caps do not protect OpenRouter spend until real
+            # per-model pricing is wired up here. ponytail: fetch openrouter.ai/api/v1/models pricing.
+            cost.register_free(model)
             return OpenRouterProvider(api_key=key, model=model, base_url=settings.openrouter_base_url)
         return AnthropicProvider(api_key=key, model=model)
     raise RuntimeError(f"unknown provider {provider!r}")

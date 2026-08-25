@@ -108,6 +108,47 @@ def test_build_provider_openrouter_with_a_key_constructs_cleanly():
     assert p.base_url == app_settings.openrouter_base_url.rstrip("/")
 
 
+def test_build_provider_openrouter_registers_the_model_so_cost_compute_never_fails_closed():
+    """Reproduces the real failure: cost.compute() runs AFTER a successful completion and raises
+    UnknownModelError for any model not in the static RATES table — which every OpenRouter model is,
+    since the catalog is open-ended. That silently turned a successful run into a reported failure
+    (the agent's actual reply was discarded; the chat showed 'model call: <model-name>', the str() of
+    the raised exception). build_provider must register the model so this can never happen again."""
+    from app.services import cost
+
+    model = "test/openrouter-arbitrary-model-never-priced"
+    assert model not in cost.RATES
+    llm.build_provider("openrouter", model, "sk-or-abc")
+    assert cost.compute(model, 100, 50) == 0.0  # would have raised UnknownModelError before the fix
+
+
+@pytest.mark.parametrize("attr", ["ollama_base_url", "mistral_base_url", "openrouter_base_url"])
+def test_openai_compatible_base_urls_dont_already_end_in_v1(attr):
+    """OllamaProvider._chat always appends '/v1/chat/completions' itself — a base URL that already
+    ends in '/v1' (an easy mistake, since that IS the real API host for some providers) doubles it
+    into '.../v1/v1/chat/completions' and 404s. Regression guard for exactly that bug."""
+    url = getattr(app_settings, attr)
+    assert not url.rstrip("/").endswith("/v1"), f"{attr}={url!r} already ends in /v1 — the client will double it"
+
+
+def test_openrouter_provider_builds_the_real_completions_url(monkeypatch):
+    """End-to-end proof, not just a string check: point a real OpenRouterProvider at a fake local
+    server and confirm the URL it actually POSTs to is the correct, non-doubled path."""
+    import httpx
+
+    seen = {}
+
+    def fake_post(url, json, timeout, headers):
+        seen["url"] = url
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}], "usage": {}},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    p = llm.OpenRouterProvider(api_key="sk-or-abc", model="some/model", base_url=app_settings.openrouter_base_url)
+    p.complete(system="", messages=[{"role": "user", "content": "hi"}], tools=[], max_tokens=16)
+    assert seen["url"] == "https://openrouter.ai/api/v1/chat/completions"
+
+
 def _client_with(db):
     def _override():
         yield db
