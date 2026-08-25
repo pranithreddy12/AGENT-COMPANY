@@ -33,10 +33,41 @@ def _recover_stuck_executions() -> None:
         db.close()
 
 
+def backfill_web_search(db) -> None:
+    """web_search didn't exist when older orgs were created, so they have no ToolRegistration row for
+    it and their worker profiles never got the grant. Idempotent: registers it per org (once) and
+    grants it to any profile that already has the 'echo'+'get_time' worker shape but not web_search
+    yet — new orgs get it at creation, this just catches the ones created before that existed."""
+    from sqlalchemy import select
+
+    from app.models import AgentProfile, Organization, ToolRegistration
+    from app.services import tools
+
+    for org in db.scalars(select(Organization)):
+        has_reg = db.scalars(select(ToolRegistration).where(
+            ToolRegistration.org_id == org.id, ToolRegistration.name == "web_search")).first()
+        if has_reg is None:
+            tools.register_builtins(db, org.id, ["web_search"])
+        for prof in db.scalars(select(AgentProfile).where(AgentProfile.org_id == org.id)):
+            grants = prof.tool_grants or []
+            if "echo" in grants and "get_time" in grants and "web_search" not in grants:
+                prof.tool_grants = [*grants, "web_search"]
+    db.commit()
+
+
+def _backfill_web_search() -> None:
+    db = SessionLocal()
+    try:
+        backfill_web_search(db)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     _recover_stuck_executions()
+    _backfill_web_search()
     yield
 
 

@@ -44,7 +44,7 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
     ceo = User(org_id=org.id, email=body.ceo_email, pw_hash=hash_password(body.ceo_password), role="ceo")
     db.add(ceo)
 
-    tools.register_builtins(db, org.id, ["echo", "get_time"])
+    tools.register_builtins(db, org.id, ["echo", "get_time", "web_search"])
 
     # Default governance policies. Higher priority wins; deny beats require_approval.
     db.add_all([
@@ -75,7 +75,7 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
             "placeholders like [Company Name], [Insert X], [Date], or 'Example'. Be concrete and "
             "actionable: specific steps, real numbers and targets, named tactics and decisions — not "
             "generic advice. Do not restate the task or narrate what you're about to do; just deliver."),
-        provider="echo", model="echo-1", max_turns=4, tool_grants=["echo", "get_time"],
+        provider="echo", model="echo-1", max_turns=4, tool_grants=["echo", "get_time", "web_search"],
     )
     db.add(worker_profile)
     db.flush()

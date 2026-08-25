@@ -8,6 +8,19 @@ from sqlalchemy.orm import Session
 
 from app.models import ToolRegistration
 
+
+def _web_search(args: dict) -> dict:
+    """Real web search (Serper) any agent can call mid-task — not just Rex's one-time project-start
+    research. Raises if SERPER_API_KEY isn't configured; runs.execute() catches that and fails the
+    run cleanly with the reason, same as any other tool error."""
+    from app.services.research import serper_search
+    query = (args or {}).get("query", "").strip()
+    if not query:
+        return {"error": "query is required", "results": []}
+    num = max(1, min(int(args.get("num") or 5), 10))  # cap: a model can't ask for hundreds of results
+    return {"results": serper_search(query, num=num)}
+
+
 # Builtin implementations keyed by name. Phase 0 ships read-only tools only.
 # Each impl: (fn(args)->dict, side_effect, input_schema, description).
 BUILTINS: dict[str, dict] = {
@@ -22,6 +35,17 @@ BUILTINS: dict[str, dict] = {
         "side_effect": "read",
         "input_schema": {"type": "object", "properties": {}},
         "description": "Return current UTC time.",
+    },
+    "web_search": {
+        "fn": _web_search,
+        "side_effect": "read",
+        "input_schema": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "what to search for"},
+            "num": {"type": "integer", "description": "number of results, 1-10 (default 5)"}},
+            "required": ["query"]},
+        "description": ("Search the live web (via Serper) and get back titles, links, and snippets. "
+                        "Use this whenever you need a current fact, news, a competitor, pricing, or "
+                        "anything else you don't already know for certain — don't guess or make it up."),
     },
 }
 

@@ -227,7 +227,10 @@ class OllamaProvider:
         self.max_plan_retries = max_plan_retries
         self.api_key = api_key
 
-    def _chat(self, system: str, messages: list[dict], max_tokens: int, json_mode: bool = False):
+    def _chat(self, system: str, messages: list[dict], max_tokens: int, json_mode: bool = False,
+             tools: list[dict] | None = None):
+        import json
+
         import httpx
 
         msgs = ([{"role": "system", "content": system}] if system else [])
@@ -237,17 +240,34 @@ class OllamaProvider:
         payload = {"model": self.model, "messages": msgs, "stream": False, "max_tokens": max_tokens}
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if tools:
+            # our internal tool shape (name/description/input_schema) -> OpenAI's function-calling shape,
+            # which every OpenAI-compatible endpoint (Mistral, OpenRouter, Ollama) actually speaks
+            payload["tools"] = [{"type": "function", "function": {
+                "name": t["name"], "description": t.get("description", ""), "parameters": t["input_schema"]}}
+                for t in tools]
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         r = httpx.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout, headers=headers)
         r.raise_for_status()
         data = r.json()
-        content = data["choices"][0]["message"]["content"] or ""
+        msg = data["choices"][0]["message"]
+        content = msg.get("content") or ""
         usage = data.get("usage", {})
-        return content, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+        tool_calls = []
+        for tc in (msg.get("tool_calls") or []):
+            fn = tc.get("function", {}) or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}  # a model that emits malformed JSON args gets an empty-args call, not a crash
+            tool_calls.append(ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), args=args))
+        return content, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), tool_calls
 
     def complete(self, *, system: str, messages: list[dict], tools: list[dict], max_tokens: int) -> Completion:
-        content, inp, out = self._chat(system, messages, max_tokens)
-        return Completion(text=content, tool_calls=[], input_tokens=inp, output_tokens=out, stop_reason="end")
+        content, inp, out, tool_calls = self._chat(system, messages, max_tokens, tools=tools)
+        stop_reason = "tool_use" if tool_calls else "end"
+        return Completion(text=content or None, tool_calls=tool_calls, input_tokens=inp, output_tokens=out,
+                          stop_reason=stop_reason)
 
     def plan(self, *, goal: str, departments: list[str], max_tokens: int) -> PlanResult:
         import json
@@ -262,7 +282,7 @@ class OllamaProvider:
         messages = [{"role": "user", "content": prompt}]
         last_err: Exception | None = None
         for _ in range(self.max_plan_retries + 1):
-            content, inp, out = self._chat("You output only JSON.", messages, max_tokens, json_mode=True)
+            content, inp, out, _tc = self._chat("You output only JSON.", messages, max_tokens, json_mode=True)
             try:
                 tasks = validate_plan(json.loads(extract_json_object(content)))
                 return PlanResult(tasks=tasks, input_tokens=inp, output_tokens=out)
