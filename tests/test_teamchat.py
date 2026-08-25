@@ -134,6 +134,49 @@ def test_summary_surfaces_legal_block_instead_of_the_text(db):
     assert "secret draft text" not in s
 
 
+def test_mentioning_the_lead_creates_no_generic_task(db):
+    """The Lead's real job is drafting a project, not producing a text artifact — @mentioning her
+    must NOT create a generic Task (that would just run her through the wrong code path and produce
+    a chatbot-style reply instead of an actual plan)."""
+    org_id = _org(db)
+    cora = next(a for a in teamchat.roster(db, org_id) if a.role == "lead")
+    out = teamchat.post(db, org_id, "@cora launch a customer referral program")
+    db.commit()
+    assert len(out["tasks"]) == 1
+    t = out["tasks"][0]
+    assert t["kind"] == "lead" and t["actor_id"] == cora.id
+    assert "launch a customer referral program" in t["goal"]
+    assert db.scalar(select(Task).where(Task.org_id == org_id)) is None  # no Task row created
+
+
+def test_mentioning_the_lead_drafts_a_real_project(db):
+    """Mirrors run_chat_lead_in_background's core logic with the test's own session (the real
+    function opens its own SessionLocal, which points at the app's db, not this test's in-memory
+    one) — proves the Lead mention path actually calls planning.draft_project, not the generic
+    single-task executor."""
+    from app.models import Project
+    from app.services import planning
+
+    org_id = _org(db)
+    out = teamchat.post(db, org_id, "@cora launch a customer referral program")
+    db.commit()
+    t = out["tasks"][0]
+
+    project, drafted = planning.draft_project(db, org_id, t["goal"])
+    db.commit()
+    assert isinstance(project, Project) and project.status == "planning"
+    assert len(drafted) >= 3  # a real decomposed DAG, not a one-line chatbot reply
+
+    agent = db.get(Actor, t["actor_id"])
+    teamchat._reply(db, org_id, agent,
+                    f"Drafted a plan — {len(drafted)} tasks across "
+                    f"{len({d.department_id for d in drafted})} departments.")
+    db.commit()
+    last = teamchat.history(db, org_id)[-1]
+    assert last["is_agent"] is True and last["sender"] == agent.name
+    assert "Drafted a plan" in last["content"]
+
+
 def test_chat_tasks_share_one_project(db):
     org_id = _org(db)
     teamchat.post(db, org_id, "@sam first thing")

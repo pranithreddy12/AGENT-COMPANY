@@ -34,14 +34,19 @@ def get_chat(db: Session = Depends(get_db), p: Principal = Depends(current_princ
 @router.post("/teamchat")
 def post_chat(body: ChatPost, db: Session = Depends(get_db),
               p: Principal = Depends(require_role("ceo", "dept_head"))) -> dict:
-    """Post to the team chat. Every @mentioned agent gets a real Task and starts working on it in
-    the background (agent -> Critic -> Legal), then posts its result back into the chat. Returns as
-    soon as the tasks are queued so the UI never blocks on a model call."""
+    """Post to the team chat. Every @mentioned agent starts real work in the background and posts
+    its result back into the chat: the Lead drafts a real project (her actual job), everyone else
+    gets a real Task run through agent -> Critic -> Legal. Returns as soon as work is queued so the
+    UI never blocks on a model call."""
     result = teamchat.post(db, p.org_id, body.message, sender_actor_id=None)
     if result.get("error") == "empty_message":
         raise HTTPException(status_code=400, detail="message is empty")
-    db.commit()  # persist message + tasks before the workers (own sessions) pick them up
+    db.commit()  # persist message + queued work before the workers (own sessions) pick them up
     for t in result["tasks"]:
-        threading.Thread(target=teamchat.run_chat_task_in_background,
-                         args=(t["task_id"],), daemon=True).start()
+        if t["kind"] == "lead":
+            threading.Thread(target=teamchat.run_chat_lead_in_background,
+                             args=(p.org_id, t["actor_id"], t["goal"]), daemon=True).start()
+        else:
+            threading.Thread(target=teamchat.run_chat_task_in_background,
+                             args=(t["task_id"],), daemon=True).start()
     return result

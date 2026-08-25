@@ -65,8 +65,11 @@ def parse_mentions(text: str, agents: list[Actor]) -> list[Actor]:
 
 
 def post(db: Session, org_id: str, text: str, sender_actor_id: str | None = None) -> dict:
-    """Post a human message to the team chat. Every @mentioned agent gets a real Task assigned.
-    Returns the message + the ids of tasks created (the caller runs them in the background)."""
+    """Post a human message to the team chat. Every @mentioned agent gets real work. The Lead is
+    special: her actual job is turning a goal into a task DAG (planning.draft_project — the same
+    thing the Dashboard's "Plan it" directive calls), not producing a text artifact, so @mentioning
+    her creates a real Project instead of a generic Task. Everyone else gets a Task assigned exactly
+    as before. Returns the message + what to run in the background per mention."""
     text = (text or "").strip()
     if not text:
         return {"error": "empty_message"}
@@ -80,12 +83,44 @@ def post(db: Session, org_id: str, text: str, sender_actor_id: str | None = None
     goal = _MENTION_RE.sub("", text).strip() or text  # the instruction minus the @handles
     tasks = []
     for agent in mentioned:
+        if agent.role == "lead":
+            tasks.append({"kind": "lead", "actor_id": agent.id, "goal": goal,
+                         "agent": agent.name, "handle": handle(agent)})
+            continue
         t = Task(org_id=org_id, project_id=project.id, goal=goal, department_id=agent.department_id,
                  assignee_actor_id=agent.id, status="in_progress", est_effort_hours=1.0)
         db.add(t)
         db.flush()
-        tasks.append({"task_id": t.id, "agent": agent.name, "handle": handle(agent)})
+        tasks.append({"kind": "task", "task_id": t.id, "agent": agent.name, "handle": handle(agent)})
     return {"message_id": msg.id, "tasks": tasks}
+
+
+def run_chat_lead_in_background(org_id: str, lead_actor_id: str, goal: str) -> None:
+    """@mentioning the Lead: draft a REAL project (planning.draft_project — a Project + a scheduled
+    task DAG across departments), then summarize it back into chat. This is the Lead's actual
+    specialized function — routing her through the generic single-task executor (like any other
+    agent) would just produce a chatbot-style reply, since her real decomposition logic lives in
+    provider.plan(), not the generic completion path a Task runs through."""
+    db = SessionLocal()
+    try:
+        agent = db.get(Actor, lead_actor_id)
+        try:
+            proj, drafted = planning.draft_project(db, org_id, goal)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            _reply(db, org_id, agent, f"I couldn't draft a plan for that: {type(e).__name__}.")
+            db.commit()
+            return
+        depts = len({t.department_id for t in drafted})
+        _reply(db, org_id, agent,
+              f"Drafted a plan — {len(drafted)} task{'s' if len(drafted) != 1 else ''} across "
+              f"{depts} department{'s' if depts != 1 else ''}. Open it from Projects to review and run it.")
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 
 
 def run_chat_task_in_background(task_id: str) -> None:
