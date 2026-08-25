@@ -321,6 +321,14 @@ class AskAgentRequest(BaseModel):
     project_id: str | None = None
 
 
+class AgentProfileUpdate(BaseModel):
+    system_prompt: str | None = None
+    autonomy_default: str | None = None  # L0..L3
+    max_turns: int | None = None
+    max_tokens: int | None = None
+    cost_ceiling_usd: float | None = None
+
+
 # --- Model / brains settings ---
 
 class LLMSettingsIn(BaseModel):

@@ -1056,32 +1056,86 @@ async function saveLlmSettings(){
   }catch(e){ msg.textContent='Error '+(e.status||'')+': '+(e.detail||''); }
 }
 
+function historyRow(e){
+  return `<div class="lrow" style="padding:8px 4px">
+    <div class="lt">
+      <div class="ltitle" style="font-size:13px">${esc(e.goal).slice(0,90)}</div>
+      <div class="lsub">${e.project_goal?esc(e.project_goal).slice(0,64):'—'}</div>
+    </div>
+    <div class="lmeta">${e.when?timeAgo(e.when):badge(e.status)}</div>
+  </div>`;
+}
+function historySection(title, entries, emptyMsg){
+  const shown = entries.slice(0, 8);
+  return `<div>
+    <div class="lbl muted" style="font-weight:650;font-size:12px;margin-bottom:2px">${title} (${entries.length})</div>
+    ${shown.length?shown.map(historyRow).join(''):`<div class="faint" style="padding:8px 4px">${emptyMsg}</div>`}
+    ${entries.length>8?`<div class="faint" style="padding:4px 4px">+${entries.length-8} more</div>`:''}
+  </div>`;
+}
+function agentCard(a){
+  return `<div class="art-card" id="card_${a.id}"><div class="ah">
+      <b>${esc(a.name)}</b> ${badge(a.role)} <span class="muted">${esc(a.department)}</span>
+      <span class="spacer"></span>
+      <span class="chip">${esc(a.provider)}:${esc(a.model)}</span><span class="chip">autonomy ${esc(a.autonomy)}</span>
+      <button class="btn btn-sm" onclick="toggleAgentEdit('${a.id}')">Edit</button></div>
+    <div class="grid cards" style="margin-top:13px">
+      ${scTile('Tasks done', a.scorecard.tasks_completed)}
+      ${scTile('First-pass', pct(a.scorecard.first_pass_rate))}
+      ${scTile('Rework', pct(a.scorecard.rework_rate))}
+      ${scTile('Escalation', pct(a.scorecard.escalation_rate))}
+      ${scTile('Runs', a.scorecard.runs)}
+      ${scTile('Cost/task', '$'+a.scorecard.cost_per_task)}
+    </div>
+    <div id="edit_${a.id}" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+      <div class="form-grid">
+        <div style="grid-column:1/-1"><label>System prompt</label>
+          <textarea id="sp_${a.id}" rows="3" style="width:100%;resize:vertical">${esc(a.system_prompt)}</textarea></div>
+        <div><label>Autonomy</label><select id="au_${a.id}">
+          ${['L0','L1','L2','L3'].map(l=>`<option value="${l}" ${a.autonomy===l?'selected':''}>${l}</option>`).join('')}</select></div>
+        <div><label>Max turns</label><input id="mt_${a.id}" type="number" min="1" value="${a.max_turns}"></div>
+        <div><label>Max tokens</label><input id="mx_${a.id}" type="number" min="1" value="${a.max_tokens}"></div>
+        <div><label>Cost ceiling ($)</label><input id="cc_${a.id}" type="number" min="0" step="0.01" value="${a.cost_ceiling_usd}"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn btn-primary btn-sm" onclick="saveAgentEdit('${a.id}')">Save</button>
+        <span class="faint" id="edit-msg_${a.id}"></span>
+      </div>
+    </div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px;margin-top:16px">
+      ${historySection('✓ Completed', a.history.completed, 'none yet')}
+      ${historySection('● In progress', a.history.in_progress, 'nothing running')}
+      ${historySection('◷ Scheduled', a.history.scheduled, 'nothing queued')}
+      ${a.history.blocked.length?historySection('⛔ Blocked', a.history.blocked, ''):''}
+    </div>
+    <div class="row" style="margin-top:16px"><input id="q_${a.id}" placeholder="Ask ${esc(a.name)} for a status update or anything…" style="flex:1"><button class="btn btn-sm" onclick="askAgent('${a.id}')">Ask</button></div>
+    <div class="faint" id="ans_${a.id}" style="margin-top:10px;white-space:pre-wrap;line-height:1.55;font-size:13.5px"></div>
+    </div>`;
+}
+function toggleAgentEdit(id){
+  const el=document.getElementById('edit_'+id);
+  el.style.display = el.style.display==='none' ? 'block' : 'none';
+}
+async function saveAgentEdit(id){
+  const msg=document.getElementById('edit-msg_'+id);
+  const body={
+    system_prompt: document.getElementById('sp_'+id).value,
+    autonomy_default: document.getElementById('au_'+id).value,
+    max_turns: +document.getElementById('mt_'+id).value,
+    max_tokens: +document.getElementById('mx_'+id).value,
+    cost_ceiling_usd: +document.getElementById('cc_'+id).value,
+  };
+  msg.textContent='Saving…';
+  try{ await api('PATCH','/agents/'+id, body); toast('Agent updated','ok'); V.agents(); }
+  catch(e){ msg.textContent='Error '+(e.status||'')+': '+(e.detail||''); }
+}
+
 V.agents = async () => {
-  setTitle('Agents','the AI workforce');
+  setTitle('Agents','the AI workforce — history and configuration');
   const agents = await api('GET','/agents');
   const el=document.getElementById('view'); el.innerHTML='';
   el.append($(`<div class="panel"><h2>Workforce (${agents.length})</h2><div style="margin-top:14px">
-    ${agents.map(a=>`<div class="art-card"><div class="ah">
-        <b>${esc(a.name)}</b> ${badge(a.role)} <span class="muted">${esc(a.department)}</span>
-        <span class="spacer"></span>
-        <span class="chip">${esc(a.provider)}:${esc(a.model)}</span><span class="chip">autonomy ${esc(a.autonomy)}</span></div>
-      <div class="grid cards" style="margin-top:13px">
-        ${scTile('Tasks done', a.scorecard.tasks_completed)}
-        ${scTile('First-pass', pct(a.scorecard.first_pass_rate))}
-        ${scTile('Rework', pct(a.scorecard.rework_rate))}
-        ${scTile('Escalation', pct(a.scorecard.escalation_rate))}
-        ${scTile('Runs', a.scorecard.runs)}
-        ${scTile('Cost/task', '$'+a.scorecard.cost_per_task)}
-      </div>
-      <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px;margin-top:13px">
-        <div><div class="lbl muted" style="margin-bottom:6px;font-weight:600;font-size:12px">✓ Completed (${a.completed.length})</div>
-          ${a.completed.length?a.completed.map(g=>`<div class="chip" style="background:var(--green-soft);color:var(--green);border-color:transparent">${esc(g).slice(0,42)}</div>`).join(''):'<span class="faint">none yet</span>'}</div>
-        <div><div class="lbl muted" style="margin-bottom:6px;font-weight:600;font-size:12px">○ To-do (${a.todo.length})</div>
-          ${a.todo.length?a.todo.map(g=>`<div class="chip">${esc(g).slice(0,42)}</div>`).join(''):'<span class="faint">nothing pending</span>'}</div>
-      </div>
-      <div class="row" style="margin-top:13px"><input id="q_${a.id}" placeholder="Ask ${esc(a.name)} for a status update or anything…" style="flex:1"><button class="btn btn-sm" onclick="askAgent('${a.id}')">Ask</button></div>
-      <div class="faint" id="ans_${a.id}" style="margin-top:10px;white-space:pre-wrap;line-height:1.55;font-size:13.5px"></div>
-      </div>`).join('')}</div></div>`));
+    ${agents.map(agentCard).join('')}</div></div>`));
 };
 
 async function askAgent(id){
