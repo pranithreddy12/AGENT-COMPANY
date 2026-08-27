@@ -132,7 +132,8 @@ Press `Ctrl+C` in the terminal where the server runs. The database is auto-saved
 
 ### Port already in use
 
-If `8000` is already in use, run:
+`startup.bat` picks the next free port automatically (it starts at 8000 and bumps while
+anything is bound, then prints the actual console URL). To choose a port yourself:
 
 ```bash
 uvicorn app.main:app --port 8001 --reload

@@ -49,11 +49,17 @@ if errorlevel 1 (
 )
 echo.
 
+REM Pick a free port: start at 8000, bump until nothing is bound (8000/8001 are often taken
+REM by other projects on this machine). Ask PowerShell which port is actually usable.
+set PORT=8000
+for /f %%p in ('powershell -NoProfile -Command "$p=8000; while (Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue) { $p++ }; Write-Output $p" 2^>nul') do set PORT=%%p
+
 REM Determine the URL
-set SERVER_URL=http://127.0.0.1:8000/console
-set API_DOCS=http://127.0.0.1:8000/docs
+set SERVER_URL=http://127.0.0.1:%PORT%/console
+set API_DOCS=http://127.0.0.1:%PORT%/docs
 
 echo [4/4] Starting Company OS server...
+if not "%PORT%"=="8000" echo Port 8000 was busy - using port %PORT% instead.
 echo.
 echo ================================
 echo Server is running!
@@ -66,7 +72,7 @@ echo Press Ctrl+C to stop the server.
 echo.
 
 REM Start the server
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port %PORT%
 
 REM If we get here, the server stopped
 echo.
