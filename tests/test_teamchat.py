@@ -184,3 +184,102 @@ def test_chat_tasks_share_one_project(db):
     db.commit()
     tasks = list(db.scalars(select(Task).where(Task.org_id == org_id)))
     assert len(tasks) == 2 and len({t.project_id for t in tasks}) == 1  # one chat project, not two
+
+
+# ---------- intent classification: not every @mention is a task ----------
+
+class _FakeCompletion:
+    def __init__(self, text):
+        self.text = text
+        self.tool_calls = []
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.stop_reason = "end"
+
+
+class _FakeProvider:
+    def __init__(self, verdict):
+        self.verdict = verdict
+
+    def complete(self, **kwargs):
+        return _FakeCompletion(self.verdict)
+
+
+def _make_non_echo(db, org_id, handle_):
+    """Flip one agent's profile to a non-echo provider so classify_intent takes the real-model
+    branch instead of the deterministic echo short-circuit."""
+    from app.models import AgentProfile
+
+    agent = next(a for a in teamchat.roster(db, org_id) if teamchat.handle(a) == handle_)
+    prof = db.get(AgentProfile, agent.agent_profile_id)
+    prof.provider, prof.model = "mistral", "mistral-small-latest"
+    db.commit()
+    return agent
+
+
+def test_classify_intent_echo_always_returns_task(db):
+    """Echo has no real reasoning to classify with — every mention stays a task, preserving this
+    path's original, already-tested contract for the zero-cost demo/test provider."""
+    org_id = _org(db)
+    cleo = next(a for a in teamchat.roster(db, org_id) if teamchat.handle(a) == "cleo")
+    assert teamchat.classify_intent(db, org_id, cleo, "what's the status?", "") == "task"
+
+
+def test_classify_intent_parses_task_verdict_from_a_real_provider(db, monkeypatch):
+    org_id = _org(db)
+    agent = _make_non_echo(db, org_id, "sam")
+    monkeypatch.setattr(teamchat.llm, "build_provider", lambda *a, **k: _FakeProvider("TASK"))
+    assert teamchat.classify_intent(db, org_id, agent, "draft a proposal", "") == "task"
+
+
+def test_classify_intent_parses_chat_verdict_from_a_real_provider(db, monkeypatch):
+    org_id = _org(db)
+    agent = _make_non_echo(db, org_id, "sam")
+    monkeypatch.setattr(teamchat.llm, "build_provider", lambda *a, **k: _FakeProvider("CHAT"))
+    assert teamchat.classify_intent(db, org_id, agent, "what's the status?", "") == "chat"
+
+
+def test_classify_intent_fails_safe_to_chat_on_provider_error(db, monkeypatch):
+    """If classification itself can't run (network error, bad config), default to the cheaper, safer
+    path — a plain reply — not a wasted Critic/Legal cycle or plan attempt on a guess."""
+    org_id = _org(db)
+    agent = _make_non_echo(db, org_id, "sam")
+
+    def _boom(*a, **k):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(teamchat.llm, "build_provider", _boom)
+    assert teamchat.classify_intent(db, org_id, agent, "draft a proposal", "") == "chat"
+
+
+def test_post_routes_a_chat_classified_mention_without_creating_a_task(db, monkeypatch):
+    """The core behavior the user asked for: a conversational message must not spawn a Task."""
+    org_id = _org(db)
+    monkeypatch.setattr(teamchat, "classify_intent", lambda *a, **k: "chat")
+    out = teamchat.post(db, org_id, "@sam what's the status on this?")
+    db.commit()
+    assert len(out["tasks"]) == 1
+    t = out["tasks"][0]
+    assert t["kind"] == "chat" and "task_id" not in t and t["actor_id"]
+    assert db.scalar(select(Task).where(Task.org_id == org_id)) is None  # no Task row created
+
+
+def test_post_lead_mention_classified_as_chat_never_attempts_to_draft_a_plan(db, monkeypatch):
+    """Reproduces the exact bug this fixes: @cora with a non-goal message ('restart the execution
+    for tasks') used to always call draft_project and fail with a raw 'PlanError' leaking into chat.
+    Classified as chat, it must route to a plain reply instead — draft_project is never even called."""
+    org_id = _org(db)
+    monkeypatch.setattr(teamchat, "classify_intent", lambda *a, **k: "chat")
+    out = teamchat.post(db, org_id, "@cora restart the execution for tasks")
+    db.commit()
+    assert out["tasks"][0]["kind"] == "chat"  # not "lead" -> draft_project is never attempted
+
+
+def test_post_lead_mention_classified_as_task_still_drafts_a_plan(db, monkeypatch):
+    """The other half: a genuine goal sent to the Lead must still go through the real planning path
+    exactly as before — classification must not break the working case while fixing the broken one."""
+    org_id = _org(db)
+    monkeypatch.setattr(teamchat, "classify_intent", lambda *a, **k: "task")
+    out = teamchat.post(db, org_id, "@cora launch a referral program")
+    db.commit()
+    assert out["tasks"][0]["kind"] == "lead"

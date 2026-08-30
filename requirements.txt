@@ -5,5 +5,6 @@ pydantic>=2
 pydantic-settings
 pyjwt
 httpx
+python-multipart  # FastAPI Form() fields — the /p/{token}/accept public accept page
 pytest
 # anthropic  # optional: only needed for the live LLM provider (a real run with a key)

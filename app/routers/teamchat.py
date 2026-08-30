@@ -34,10 +34,12 @@ def get_chat(db: Session = Depends(get_db), p: Principal = Depends(current_princ
 @router.post("/teamchat")
 def post_chat(body: ChatPost, db: Session = Depends(get_db),
               p: Principal = Depends(require_role("ceo", "dept_head"))) -> dict:
-    """Post to the team chat. Every @mentioned agent starts real work in the background and posts
-    its result back into the chat: the Lead drafts a real project (her actual job), everyone else
-    gets a real Task run through agent -> Critic -> Legal. Returns as soon as work is queued so the
-    UI never blocks on a model call."""
+    """Post to the team chat. Each @mention is classified first: a real task/goal starts real work
+    in the background (the Lead drafts a real project, her actual job; anyone else gets a real Task
+    run through agent -> Critic -> Legal) and posts its result back into the chat. A conversational
+    message (question, status check, clarification) gets a plain in-character reply instead — no
+    task machinery wasted on a message that was never asking for a deliverable. Returns as soon as
+    work is queued so the UI never blocks on a model call."""
     result = teamchat.post(db, p.org_id, body.message, sender_actor_id=None)
     if result.get("error") == "empty_message":
         raise HTTPException(status_code=400, detail="message is empty")
@@ -45,6 +47,9 @@ def post_chat(body: ChatPost, db: Session = Depends(get_db),
     for t in result["tasks"]:
         if t["kind"] == "lead":
             threading.Thread(target=teamchat.run_chat_lead_in_background,
+                             args=(p.org_id, t["actor_id"], t["goal"]), daemon=True).start()
+        elif t["kind"] == "chat":
+            threading.Thread(target=teamchat.run_chat_reply_in_background,
                              args=(p.org_id, t["actor_id"], t["goal"]), daemon=True).start()
         else:
             threading.Thread(target=teamchat.run_chat_task_in_background,

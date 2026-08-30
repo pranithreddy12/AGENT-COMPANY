@@ -12,8 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models import Actor, Artifact, Department, Message, Project, Task, Thread
-from app.services import communication, planning
+from app.models import Actor, AgentProfile, Artifact, Department, Message, Project, Task, Thread
+from app.services import communication, llm, planning
 
 TEAM_THREAD_TYPE = "team"
 _CHAT_PROJECT_GOAL = "Team chat requests"
@@ -76,14 +76,50 @@ def parse_mentions(text: str, agents: list[Actor]) -> list[Actor]:
     return out
 
 
+def classify_intent(db: Session, org_id: str, agent: Actor, text: str, transcript: str) -> str:
+    """Is this @mention asking for real work — a new goal/deliverable to actually produce or execute
+    (or, for the Lead, decompose into a project) — or is it conversational: a question, a status
+    check, a clarification, or an instruction that isn't itself a concrete deliverable? Not every
+    message that mentions an agent is a task; forcing all of them through task machinery is what
+    produced confusing internal errors (e.g. "PlanError") leaking into the chat for messages that
+    were never actually a piece of work.
+
+    Classified by the agent's own configured model. Echo (deterministic, zero real reasoning) always
+    classifies as "task" — that's not a cop-out, it's honest: Echo can't classify natural-language
+    intent at all, and "always task" is this path's original, already-tested contract for the
+    zero-cost demo/test provider. Real classification only matters once a real model is configured —
+    which is exactly where the bug this fixes was actually hit. Fails safe to "chat" on any
+    classification error: if we can't even tell what was asked, a plain reply is cheaper and safer
+    than burning a Critic+Legal cycle (or a plan attempt) on a guess."""
+    prof = db.get(AgentProfile, agent.agent_profile_id) if agent.agent_profile_id else None
+    if prof is None or prof.provider == "echo":
+        return "task"
+    try:
+        provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, org_id, prof.provider))
+        system = (
+            "Classify the human's latest message in this team chat as exactly one word.\n"
+            "TASK: a new goal, deliverable, or piece of work to actually produce, execute, or plan.\n"
+            "CHAT: a question, status check, clarification, discussion, or an instruction that isn't "
+            "itself a concrete deliverable to produce.\n"
+            "Reply with exactly one word: TASK or CHAT."
+        )
+        user = f"Recent conversation:\n{transcript}\n\nClassify this latest message: {text}"
+        comp = provider.complete(system=system, messages=[{"role": "user", "content": user}], tools=[], max_tokens=5)
+        verdict = (comp.text or "").strip().upper()
+        return "chat" if "CHAT" in verdict and "TASK" not in verdict else "task"
+    except Exception:
+        return "chat"
+
+
 def post(
     db: Session, org_id: str, text: str, sender_actor_id: str | None = None
 ) -> dict:
-    """Post a human message to the team chat. Every @mentioned agent gets real work. The Lead is
-    special: her actual job is turning a goal into a task DAG (planning.draft_project — the same
-    thing the Dashboard's "Plan it" directive calls), not producing a text artifact, so @mentioning
-    her creates a real Project instead of a generic Task. Everyone else gets a Task assigned exactly
-    as before. Returns the message + what to run in the background per mention."""
+    """Post a human message to the team chat. Each @mentioned agent's message is classified first
+    (classify_intent): a real task/goal gets real work assigned — the Lead gets a real drafted
+    project (planning.draft_project, the same thing the Dashboard's "Plan it" directive calls), any
+    other agent gets a real Task run through Critic + Legal. A conversational message (question,
+    status check, clarification) gets a plain in-character reply instead — no Task, no Critic, no
+    Legal, no wasted plan attempt. Returns the message + what to run in the background per mention."""
     text = (text or "").strip()
     if not text:
         return {"error": "empty_message"}
@@ -97,8 +133,21 @@ def post(
     goal = (
         _MENTION_RE.sub("", text).strip() or text
     )  # the instruction minus the @handles
+    transcript = recent_transcript(db, org_id)
     tasks = []
     for agent in mentioned:
+        intent = classify_intent(db, org_id, agent, goal, transcript)
+        if intent == "chat":
+            tasks.append(
+                {
+                    "kind": "chat",
+                    "actor_id": agent.id,
+                    "goal": goal,
+                    "agent": agent.name,
+                    "handle": handle(agent),
+                }
+            )
+            continue
         if agent.role == "lead":
             tasks.append(
                 {
@@ -174,6 +223,45 @@ def run_chat_lead_in_background(org_id: str, lead_actor_id: str, goal: str) -> N
             + (f", starting with “{first[:80]}”." if first else ".")
             + " Review and approve it from Projects and I'll put the team on it.",
         )
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
+def run_chat_reply_in_background(org_id: str, actor_id: str, text: str) -> None:
+    """A conversational reply for an @mention classified as "chat" — no Task, no Critic, no Legal
+    review. The agent answers in character, grounded in the real conversation, instead of the
+    request being forced through task machinery it was never actually asking for."""
+    db = SessionLocal()
+    try:
+        agent = db.get(Actor, actor_id)
+        if agent is None:
+            return
+        prof = db.get(AgentProfile, agent.agent_profile_id) if agent.agent_profile_id else None
+        dept = db.get(Department, agent.department_id) if agent.department_id else None
+        role_desc = dept.charter if dept else "You are the Chief of Staff — you plan and route work."
+        transcript = recent_transcript(db, org_id)
+        if prof is None:
+            _reply(db, org_id, agent, "I don't have a model configured to answer that.")
+            db.commit()
+            return
+        try:
+            provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, org_id, prof.provider))
+            system = (
+                f"You are {agent.name}, the {dept.name if dept else 'Lead'} agent at an AI-run "
+                f"agency. {role_desc} Reply directly and briefly, in first person, grounded in the "
+                "real conversation below. This is a chat answer, not a deliverable — do not produce "
+                "a formal document; just answer what was actually asked."
+            )
+            user = f"Recent conversation:\n{transcript}\n\nRespond to the latest message."
+            comp = provider.complete(system=system, messages=[{"role": "user", "content": user}],
+                                     tools=[], max_tokens=400)
+            reply = (comp.text or "").strip() or "(no response)"
+        except Exception as e:
+            reply = f"I couldn't answer that: {type(e).__name__}."
+        _reply(db, org_id, agent, reply)
         db.commit()
     except Exception:
         db.rollback()
