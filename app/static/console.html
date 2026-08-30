@@ -740,8 +740,7 @@ function pollChat(){
   clearInterval(CHAT_POLL); let n=0;
   CHAT_POLL = setInterval(async ()=>{
     if(++n>60 || !location.hash.includes('teamchat')){ clearInterval(CHAT_POLL); return; }
-    if(document.activeElement === document.getElementById('chat-in')) return;  // don't clobber typing
-    await refreshChatLog();
+    await refreshChatLog();  // safe even while typing — this only ever touches #chatlog, never the input
   }, 3000);
 }
 
