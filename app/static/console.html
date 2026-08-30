@@ -569,6 +569,7 @@ const V = {};
 
 // ---- Team chat: assign work by @mentioning an agent ----------------------------------------
 let CHAT_POLL = null;
+let _lastChatMsgId = null, _lastChatMsgCount = -1;   // what refreshChatLog last rendered, to skip no-op redraws
 const DEPT_PALETTE = ['av-blue','av-green','av-purple','av-amber','av-red','av-gold'];
 function deptColor(name){
   if(!name) return 'av-blue';
@@ -696,9 +697,28 @@ V.teamchat = async () => {
     </div>
   </div>`));
   const log = document.getElementById('chatlog'); log.scrollTop = log.scrollHeight;
+  _lastChatMsgCount = data.messages.length;
+  _lastChatMsgId = data.messages.length ? data.messages[data.messages.length-1].id : null;
   document.getElementById('chat-in').addEventListener('keydown', e=>{ if(e.key==='Enter') sendChat(); });
   document.getElementById('chat-in').focus();
 };
+
+// Redraws ONLY the message list — never the roster/composer/right panel — so polling for a reply
+// doesn't retrigger every bubble's entrance animation, steal focus from the input, or reset scroll.
+// Skips the redraw entirely when nothing actually changed (same message count + same last id).
+async function refreshChatLog(){
+  const log = document.getElementById('chatlog');
+  if(!log) return;   // navigated away from Team chat
+  let data;
+  try{ data = await api('GET','/teamchat'); } catch(_){ return; }
+  const lastId = data.messages.length ? data.messages[data.messages.length-1].id : null;
+  if(data.messages.length === _lastChatMsgCount && lastId === _lastChatMsgId) return;  // nothing new
+  _lastChatMsgCount = data.messages.length; _lastChatMsgId = lastId;
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;  // was already at the bottom
+  log.innerHTML = data.messages.length ? data.messages.map(chatBubble).join('')
+    : empty('No messages yet. Try: <b>@cleo draft a proposal for the BizBuySell scrape</b>');
+  if(nearBottom) log.scrollTop = log.scrollHeight;   // only autoscroll if not reading back through history
+}
 
 async function sendChat(){
   const box = document.getElementById('chat-in'); const text = box.value.trim();
@@ -713,7 +733,7 @@ async function sendChat(){
       pollChat();   // agents take 30-90s on a real model; stream their replies in
     }
   }catch(e){ toast('Send failed ('+(e.status||'')+')','err'); }
-  finally{ box.disabled=false; box.focus(); await V.teamchat(); }
+  finally{ box.disabled=false; box.focus(); await refreshChatLog(); }
 }
 
 function pollChat(){
@@ -721,7 +741,7 @@ function pollChat(){
   CHAT_POLL = setInterval(async ()=>{
     if(++n>60 || !location.hash.includes('teamchat')){ clearInterval(CHAT_POLL); return; }
     if(document.activeElement === document.getElementById('chat-in')) return;  // don't clobber typing
-    await V.teamchat();
+    await refreshChatLog();
   }, 3000);
 }
 
