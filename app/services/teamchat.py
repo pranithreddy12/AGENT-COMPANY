@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import Actor, AgentProfile, Artifact, Department, Message, Project, Task, Thread
-from app.services import communication, llm, planning
+from app.services import agent_memory, communication, llm, planning
 
 TEAM_THREAD_TYPE = "team"
 _CHAT_PROJECT_GOAL = "Team chat requests"
@@ -232,8 +232,9 @@ def run_chat_lead_in_background(org_id: str, lead_actor_id: str, goal: str) -> N
 
 def run_chat_reply_in_background(org_id: str, actor_id: str, text: str) -> None:
     """A conversational reply for an @mention classified as "chat" — no Task, no Critic, no Legal
-    review. The agent answers in character, grounded in the real conversation, instead of the
-    request being forced through task machinery it was never actually asking for."""
+    review. The agent answers in character (its own configured persona, not a generic role blurb),
+    grounded in the real conversation AND its own memory, instead of the request being forced
+    through task machinery it was never actually asking for."""
     db = SessionLocal()
     try:
         agent = db.get(Actor, actor_id)
@@ -241,27 +242,35 @@ def run_chat_reply_in_background(org_id: str, actor_id: str, text: str) -> None:
             return
         prof = db.get(AgentProfile, agent.agent_profile_id) if agent.agent_profile_id else None
         dept = db.get(Department, agent.department_id) if agent.department_id else None
-        role_desc = dept.charter if dept else "You are the Chief of Staff — you plan and route work."
         transcript = recent_transcript(db, org_id)
         if prof is None:
             _reply(db, org_id, agent, "I don't have a model configured to answer that.")
             db.commit()
             return
+        # the agent's own configured personality is the voice here — not a generic department
+        # blurb — so different agents genuinely sound different when they answer in chat
+        persona = prof.system_prompt or (
+            f"You are {agent.name}, the {dept.name if dept else 'Lead'} agent at an AI-run agency."
+        )
+        own_memory = agent_memory.agent_memory_context(db, org_id, agent)
         try:
             provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, org_id, prof.provider))
             system = (
-                f"You are {agent.name}, the {dept.name if dept else 'Lead'} agent at an AI-run "
-                f"agency. {role_desc} Reply directly and briefly, in first person, grounded in the "
-                "real conversation below. This is a chat answer, not a deliverable — do not produce "
-                "a formal document; just answer what was actually asked."
+                f"{persona}\n\nYou're replying in a team chat, not producing a deliverable. Reply "
+                "directly and briefly, in first person, grounded in the real conversation and your "
+                "own memory below — don't produce a formal document, just answer what was asked."
             )
-            user = f"Recent conversation:\n{transcript}\n\nRespond to the latest message."
+            user = (
+                (f"Your own memory from past work:\n{own_memory}\n\n" if own_memory else "")
+                + f"Recent conversation:\n{transcript}\n\nRespond to the latest message."
+            )
             comp = provider.complete(system=system, messages=[{"role": "user", "content": user}],
                                      tools=[], max_tokens=400)
             reply = (comp.text or "").strip() or "(no response)"
         except Exception as e:
             reply = f"I couldn't answer that: {type(e).__name__}."
         _reply(db, org_id, agent, reply)
+        agent_memory.remember_agent(db, org_id, actor_id, f"Answered in chat: {text[:120]} -> {reply[:180]}")
         db.commit()
     except Exception:
         db.rollback()

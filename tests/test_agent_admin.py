@@ -118,3 +118,75 @@ def test_update_agent_requires_ceo_or_dept_head(db):
 def _p(org_id, role="ceo"):
     from app.auth import Principal
     return Principal(user_id="u1", org_id=org_id, role=role)
+
+
+def test_every_department_agent_has_its_own_profile_not_a_shared_one(db):
+    """The real bug this fixes: all 7 department agents used to point at ONE shared AgentProfile
+    row, so editing "Sam" via PATCH /agents/{id} silently rewrote Piper, Mia, Devin, Dana, Lena, and
+    Cleo too. Each must have a distinct profile id and a distinct system_prompt now."""
+    org_id = _org(db)
+    names = ["Piper Planning Agent", "Sam Sales Agent", "Mia Marketing Agent", "Devin Dev Agent",
+             "Dana Dev Agent", "Lena Legal Agent", "Cleo Client Agent"]
+    profiles = []
+    for name in names:
+        actor = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == name)).first()
+        profiles.append(db.get(AgentProfile, actor.agent_profile_id))
+    assert len({p.id for p in profiles}) == len(names)  # every agent has its OWN profile row
+    assert len({p.system_prompt for p in profiles}) == len(names)  # every one is a distinct voice
+
+
+def test_editing_one_agent_never_changes_another(db):
+    """The exact regression: PATCH one agent's system_prompt/autonomy and confirm every other
+    agent's profile is completely untouched."""
+    from app.routers.intelligence import update_agent
+    from app.schemas import AgentProfileUpdate
+
+    org_id = _org(db)
+    sam = _sam(db, org_id)
+    mia = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Mia Marketing Agent")).first()
+    mia_prof_before = db.get(AgentProfile, mia.agent_profile_id)
+    mia_prompt_before, mia_autonomy_before = mia_prof_before.system_prompt, mia_prof_before.autonomy_default
+    assert mia_autonomy_before != "L2"  # sanity: distinguishable from what we're about to set on Sam
+
+    update_agent(sam.id, AgentProfileUpdate(system_prompt="Sell only to enterprise accounts.",
+                                            autonomy_default="L2"), db, _p(org_id, role="ceo"))
+
+    mia_prof = db.get(AgentProfile, mia.agent_profile_id)
+    assert mia_prof.system_prompt == mia_prompt_before  # completely untouched
+    assert mia_prof.autonomy_default == mia_autonomy_before  # not silently bumped to L2 too
+
+
+def test_backfill_splits_a_legacy_shared_profile_into_real_personas(db):
+    """Simulates a pre-persona-split org: all persona actors pointed at one shared 'Worker' profile.
+    Backfill must split each into its own profile with the real voice, without duplicating work."""
+    from app.main import backfill_agent_personas
+    from app.routers.orgs import PERSONAS
+
+    org_id = _org(db)
+    shared = AgentProfile(org_id=org_id, name="Worker", system_prompt="generic", provider="echo",
+                          model="echo-1", max_turns=4, tool_grants=["echo"])
+    db.add(shared)
+    db.flush()
+    actors = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name.in_(PERSONAS.keys()))).all()
+    for a in actors:
+        a.agent_profile_id = shared.id
+    db.commit()
+
+    backfill_agent_personas(db)
+    db.commit()
+
+    profile_ids = set()
+    for a in actors:
+        db.refresh(a)
+        prof = db.get(AgentProfile, a.agent_profile_id)
+        assert prof.name == a.name
+        assert prof.system_prompt.startswith(PERSONAS[a.name][1][:30])
+        profile_ids.add(prof.id)
+    assert len(profile_ids) == len(actors)  # each got its own row, none still shared
+
+    # idempotent: running again doesn't create yet more profiles
+    backfill_agent_personas(db)
+    db.commit()
+    for a in actors:
+        db.refresh(a)
+    assert {db.get(AgentProfile, a.agent_profile_id).id for a in actors} == profile_ids

@@ -22,6 +22,7 @@ from app.models import (
     Thread,
 )
 from app.services import (
+    agent_memory,
     cost,
     communication,
     events,
@@ -403,6 +404,16 @@ def _gather_context(
                 "Shared project knowledge so far:\n- "
                 + "\n- ".join(m.content for m in mem[-8:])
             )
+    # the agent's OWN memory — separate from shared project knowledge above, this is what THIS
+    # agent personally remembers across everything it has worked on, always included regardless of
+    # include_memory (that flag only gates the cross-task shared bucket, not an agent's own history)
+    assignee_id = getattr(task, "assignee_actor_id", None)
+    if assignee_id and db is not None:
+        assignee = db.get(Actor, assignee_id)
+        if assignee:
+            own = agent_memory.agent_memory_context(db, project.org_id, assignee)
+            if own:
+                parts.append(f"Your own memory from past work:\n{own}")
     return "\n\n".join(parts)
 
 
@@ -423,6 +434,20 @@ def _remember(
         )
     )
     db.flush()
+
+
+def _remember_for_agent(db: Session, project: Project, task: Task, artifact: Artifact) -> None:
+    """Separate from _remember above: this writes to the AGENT'S OWN persistent memory (carried
+    across every project it ever works on), not the shared per-project bucket. Called whenever a
+    task actually produces something — including chat-assigned work, which never wrote shared
+    project memory but should still build the agent's own history."""
+    if not artifact.produced_by_actor_id:
+        return
+    summary = " ".join((artifact.content or "").split())[:220]
+    agent_memory.remember_agent(
+        db, project.org_id, artifact.produced_by_actor_id,
+        f"Worked on '{task.goal}': {summary}", project_id=project.id,
+    )
 
 
 def _status_thread(db: Session, project: Project) -> Thread:
@@ -557,6 +582,8 @@ def rerun_task(
         context = f"{context}\n\n{extra_context}".strip()
     art = _run_and_review(db, project, task, critic, context=context)
     task.status = "done" if not art.needs_human else "blocked"
+    if not art.needs_human and art.content:
+        _remember_for_agent(db, project, task, art)  # chat-assigned work builds the agent's history too
     db.commit()
     return art
 
@@ -620,6 +647,7 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
             _remember(
                 db, project, t, art, depts
             )  # Archivist: share it in project memory
+            _remember_for_agent(db, project, t, art)  # ...and in the agent's own persistent memory
             _announce_done(
                 db, project, t, art, tasks, actors
             )  # agent reports back in the chat, hands off

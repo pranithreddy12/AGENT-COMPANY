@@ -63,11 +63,46 @@ def _backfill_web_search() -> None:
         db.close()
 
 
+def backfill_agent_personas(db) -> None:
+    """Orgs created before the persona split had all 7 department agents share one AgentProfile row
+    (editing one silently rewrote all of them). Idempotent: gives each persona actor its own profile
+    with its real voice, skipping any actor whose profile is already named after it (already split)."""
+    from sqlalchemy import select
+
+    from app.models import Actor, AgentProfile
+    from app.routers.orgs import PERSONAS, _HARD_RULES
+
+    for persona, (_dept, voice) in PERSONAS.items():
+        for actor in db.scalars(select(Actor).where(Actor.name == persona)):
+            prof = db.get(AgentProfile, actor.agent_profile_id) if actor.agent_profile_id else None
+            if prof is not None and prof.name == persona:
+                continue  # already split
+            new_profile = AgentProfile(
+                org_id=actor.org_id, name=persona, system_prompt=f"{voice} {_HARD_RULES}",
+                provider=prof.provider if prof else "echo", model=prof.model if prof else "echo-1",
+                max_turns=prof.max_turns if prof else 4,
+                tool_grants=prof.tool_grants if prof else ["echo", "get_time", "web_search"],
+            )
+            db.add(new_profile)
+            db.flush()
+            actor.agent_profile_id = new_profile.id
+    db.commit()
+
+
+def _backfill_agent_personas() -> None:
+    db = SessionLocal()
+    try:
+        backfill_agent_personas(db)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     _recover_stuck_executions()
     _backfill_web_search()
+    _backfill_agent_personas()
     yield
 
 

@@ -26,6 +26,50 @@ DEPARTMENTS = {
     "Client Management": "Owns the client relationship, status updates, scope-change detection.",
 }
 
+# Non-negotiable output quality bar — every agent's prompt ends with this, regardless of persona.
+_HARD_RULES = (
+    "Hard rules: use the real specifics from the context — NEVER write placeholders like "
+    "[Company Name], [Insert X], [Date], or 'Example'. Be concrete and actionable: specific steps, "
+    "real numbers and targets, named tactics and decisions — not generic advice. Do not restate the "
+    "task or narrate what you're about to do; just deliver."
+)
+
+# persona name -> (department, distinct personality). Each agent gets its OWN AgentProfile row (not
+# a shared one) so a genuinely different voice/working style comes through, and so editing one
+# agent's prompt (Governance -> Agents) can never silently rewrite six other agents at once.
+PERSONAS: dict[str, tuple[str, str]] = {
+    "Piper Planning Agent": ("Planning",
+        "You are Piper, the Planning specialist at a consulting agency. You think in dependencies, "
+        "timelines, and critical paths — every plan you write names what happens first, what can run "
+        "in parallel, and what blocks what. You'd rather flag a scheduling risk early than let it "
+        "slip silently."),
+    "Sam Sales Agent": ("Sales",
+        "You are Sam, the Sales specialist at a consulting agency. You write with conviction and "
+        "clarity — every proposal leads with the client's actual pain and ties each recommendation to "
+        "a concrete business outcome. You're direct, not pushy: you'd rather lose a deal honestly than "
+        "oversell it."),
+    "Mia Marketing Agent": ("Marketing",
+        "You are Mia, the Marketing specialist at a consulting agency. You write for the actual "
+        "reader, not the brief — sharp hooks, plain language, no jargon for its own sake. You care "
+        "about what makes someone stop scrolling and believe what they're reading."),
+    "Devin Dev Agent": ("Development",
+        "You are Devin, a Development specialist at a consulting agency. You're pragmatic and "
+        "implementation-first: you scope the smallest thing that actually works and call out real "
+        "tradeoffs (time vs. correctness vs. scope) instead of hand-waving a technical detail."),
+    "Dana Dev Agent": ("Development",
+        "You are Dana, a Development specialist at a consulting agency. You think about what breaks: "
+        "edge cases, failure modes, and what a shortcut costs six months after ship. You'd rather flag "
+        "a design risk now than let it become production debt later."),
+    "Lena Legal Agent": ("Legal",
+        "You are Lena, the Legal specialist at a consulting agency. You are precise and risk-averse by "
+        "design — you flag anything that could expose the client or the agency, and you never soften a "
+        "real compliance concern just to make a deal move faster."),
+    "Cleo Client Agent": ("Client Management",
+        "You are Cleo, the Client Management specialist at a consulting agency. You protect the "
+        "relationship: warm, direct, and honest with clients, and quick to flag scope creep or a "
+        "missed expectation before it becomes a bigger problem."),
+}
+
 
 @router.post("/login", response_model=TokenOut)
 def login(body: LoginRequest, db: Session = Depends(get_db)) -> TokenOut:
@@ -65,28 +109,7 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
     db.add(lead)
     db.flush()
 
-    # Shared worker profile (echo). Departments differ by charter/Playbook, not model config in v1.
-    worker_profile = AgentProfile(
-        org_id=org.id, name="Worker",
-        system_prompt=(
-            "You are a senior specialist at a consulting agency; your department playbook is in the "
-            "context. Produce ONE concrete, ready-to-use deliverable for the exact goal and client "
-            "context given. Hard rules: use the real specifics from the context — NEVER write "
-            "placeholders like [Company Name], [Insert X], [Date], or 'Example'. Be concrete and "
-            "actionable: specific steps, real numbers and targets, named tactics and decisions — not "
-            "generic advice. Do not restate the task or narrate what you're about to do; just deliver."),
-        provider="echo", model="echo-1", max_turns=4, tool_grants=["echo", "get_time", "web_search"],
-    )
-    db.add(worker_profile)
-    db.flush()
-
-    # Each agent is an individual with a persona name ending in "Agent".
-    PERSONAS = {
-        "Planning": ["Piper Planning Agent"], "Sales": ["Sam Sales Agent"],
-        "Marketing": ["Mia Marketing Agent"], "Development": ["Devin Dev Agent", "Dana Dev Agent"],
-        "Legal": ["Lena Legal Agent"], "Client Management": ["Cleo Client Agent"],
-    }
-    first_agent = None
+    depts_by_name: dict[str, Department] = {}
     for name, charter in DEPARTMENTS.items():
         dept = Department(org_id=org.id, name=name, charter=charter)
         db.add(dept)
@@ -95,12 +118,25 @@ def create_org(body: OrgCreate, db: Session = Depends(get_db)) -> OrgCreated:
             org_id=org.id, department_id=dept.id, title=f"{name} SOP v1", version=1,
             markdown=f"# {name} Playbook\n\n{charter}\n\n- Produce artifacts that meet the task acceptance criteria.\n- Escalate to a human when uncertain.\n\nRULE: Be specific to the actual client and goal — concrete numbers, named tactics, real recommendations. No placeholders, no generic templates.",
         ))
-        for persona in PERSONAS[name]:
-            a = Actor(org_id=org.id, type="agent", role="member", name=persona,
-                      agent_profile_id=worker_profile.id, department_id=dept.id)
-            db.add(a)
-            db.flush()
-            first_agent = first_agent or a
+        depts_by_name[name] = dept
+
+    # Each department agent gets its OWN AgentProfile — a distinct personality, not a shared one — so
+    # editing one agent (Governance -> Agents) can never silently rewrite the others, and each agent
+    # actually sounds like a different person instead of seven names on one clone.
+    first_agent = None
+    for persona, (dept_name, voice) in PERSONAS.items():
+        profile = AgentProfile(
+            org_id=org.id, name=persona, system_prompt=f"{voice} {_HARD_RULES}",
+            provider="echo", model="echo-1", max_turns=4,
+            tool_grants=["echo", "get_time", "web_search"],
+        )
+        db.add(profile)
+        db.flush()
+        a = Actor(org_id=org.id, type="agent", role="member", name=persona,
+                  agent_profile_id=profile.id, department_id=depts_by_name[dept_name].id)
+        db.add(a)
+        db.flush()
+        first_agent = first_agent or a
 
     # Cross-cutting Critic actor (reviews artifacts against acceptance criteria + Playbook).
     critic_profile = AgentProfile(

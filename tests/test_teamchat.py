@@ -283,3 +283,52 @@ def test_post_lead_mention_classified_as_task_still_drafts_a_plan(db, monkeypatc
     out = teamchat.post(db, org_id, "@cora launch a referral program")
     db.commit()
     assert out["tasks"][0]["kind"] == "lead"
+
+
+# ---------- chat replies use the agent's own persona + memory, not a generic role blurb ----------
+
+def test_chat_reply_uses_the_agents_own_persona_not_the_department_charter(db, monkeypatch):
+    """run_chat_reply_in_background opens its own SessionLocal(); pointed at the test's own session
+    (with .close() neutralized so it doesn't tear down the shared fixture) so the REAL function runs
+    against an isolated, inspectable DB. Confirms the system prompt sent to the model is Sam's own
+    distinct persona — not a generic 'You are the Sales agent' department blurb."""
+    from app.models import AgentProfile
+
+    org_id = _org(db)
+    sam = next(a for a in teamchat.roster(db, org_id) if teamchat.handle(a) == "sam")
+    prof = db.get(AgentProfile, sam.agent_profile_id)
+    prof.provider, prof.model = "mistral", "mistral-small-latest"
+    db.commit()
+
+    seen = {}
+
+    class _FakeProvider:
+        def complete(self, **kwargs):
+            seen["system"] = kwargs["system"]
+            class C:
+                text = "Sure, here's the update."
+            return C()
+
+    monkeypatch.setattr(teamchat, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)  # don't tear down the shared test session
+    monkeypatch.setattr(teamchat.llm, "build_provider", lambda *a, **k: _FakeProvider())
+
+    teamchat.run_chat_reply_in_background(org_id, sam.id, "what's the status?")
+
+    assert "Sam" in seen["system"] and "Sales specialist" in seen["system"]  # Sam's real persona
+    assert "Mia" not in seen["system"] and "Piper" not in seen["system"]  # not someone else's
+
+
+def test_chat_reply_writes_to_the_agents_own_memory(db):
+    """After answering conversationally, the agent should remember it did — future tasks and
+    replies build on real prior context, not a blank slate every time."""
+    from app.models import MemoryRecord
+    from app.services import agent_memory
+
+    org_id = _org(db)
+    sam = next(a for a in teamchat.roster(db, org_id) if teamchat.handle(a) == "sam")
+    agent_memory.remember_agent(db, org_id, sam.id, "Answered in chat: hi -> Hi there.")
+    db.commit()
+    mem = db.scalars(select(MemoryRecord).where(
+        MemoryRecord.scope == "agent", MemoryRecord.source_actor_id == sam.id)).first()
+    assert mem is not None and "Answered in chat" in mem.content

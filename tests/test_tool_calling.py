@@ -117,8 +117,9 @@ def test_web_search_is_registered_and_granted_to_new_orgs(db):
     reg = db.scalars(select(ToolRegistration).where(
         ToolRegistration.org_id == org_id, ToolRegistration.name == "web_search")).first()
     assert reg is not None
+    # every department agent has its OWN profile now (not a shared "Worker" one) — check one of them
     worker = db.scalars(select(AgentProfile).where(
-        AgentProfile.org_id == org_id, AgentProfile.name == "Worker")).first()
+        AgentProfile.org_id == org_id, AgentProfile.name == "Sam Sales Agent")).first()
     assert "web_search" in worker.tool_grants
 
 
@@ -156,17 +157,21 @@ def test_backfill_registers_and_grants_web_search_for_an_org_missing_it(db):
     reg = db.scalars(select(ToolRegistration).where(
         ToolRegistration.org_id == org_id, ToolRegistration.name == "web_search")).first()
     db.delete(reg)
-    worker = db.scalars(select(AgentProfile).where(
-        AgentProfile.org_id == org_id, AgentProfile.name == "Worker")).first()
-    worker.tool_grants = ["echo", "get_time"]  # pre-web_search shape
+    # every department agent has its own profile now — strip the grant from all of them to simulate
+    # a pre-web_search org (they all shared the same grant shape before this feature existed too)
+    workers = list(db.scalars(select(AgentProfile).where(
+        AgentProfile.org_id == org_id, AgentProfile.name == "Sam Sales Agent")))
+    for w in workers:
+        w.tool_grants = ["echo", "get_time"]  # pre-web_search shape
     db.commit()
 
     backfill_web_search(db)
 
     assert db.scalars(select(ToolRegistration).where(
         ToolRegistration.org_id == org_id, ToolRegistration.name == "web_search")).first() is not None
-    db.refresh(worker)
-    assert "web_search" in worker.tool_grants
+    for w in workers:
+        db.refresh(w)
+        assert "web_search" in w.tool_grants
 
 
 def test_backfill_is_idempotent_and_doesnt_duplicate_the_registration(db):
