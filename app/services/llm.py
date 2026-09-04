@@ -379,7 +379,11 @@ class OllamaProvider:
         self,
         model: str,
         base_url: str,
-        timeout: float = 300.0,
+        # a big local model on modest hardware is genuinely slow — observed live: a single trivial
+        # completion took ~70s on this machine, and a real multi-turn task (worker + revise cycles)
+        # can exceed 300s on one call alone. Still bounded, just not so tight it turns real, slow-but-
+        # working inference into a manufactured "model call: timed out" failure.
+        timeout: float = 900.0,
         max_plan_retries: int = 2,
         api_key: str | None = None,
     ):

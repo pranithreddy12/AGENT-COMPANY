@@ -303,6 +303,9 @@
   .chatbody li{margin:3px 0}
   .chatbody code{background:rgba(127,127,127,.18);padding:1px 5px;border-radius:4px;
     font:12.4px ui-monospace,SFMono-Regular,Menlo,monospace}
+  .chatbody .md-code{background:rgba(127,127,127,.12);border:1px solid var(--border);border-radius:6px;
+    padding:9px 11px;margin:8px 0;overflow-x:auto;white-space:pre;
+    font:12.4px ui-monospace,SFMono-Regular,Menlo,monospace}
   .chatbody hr{border:none;border-top:1px solid currentColor;opacity:.2;margin:11px 0}
   .chatbody.clamped{max-height:230px;overflow:hidden;position:relative}
   .chatbody.clamped::after{content:"";position:absolute;left:0;right:0;bottom:0;height:52px;
@@ -581,6 +584,13 @@ function deptColor(name){
 // content — human-typed or model-generated — can inject real HTML; only the tags we add below exist.
 function mdToHtml(raw){
   let s = esc(raw||'');
+  // fenced ```code``` blocks first, pulled out to numbered placeholders — otherwise their own
+  // content (asterisks, dashes, backticks) gets mangled by every regex below meant for prose
+  const blocks = [];
+  s = s.replace(/```[\w-]*\n?([\s\S]*?)```/g, (_, code) => {
+    blocks.push('<pre class="md-code">' + code.replace(/\n$/, '') + '</pre>');
+    return 'MDBLOCK' + (blocks.length - 1) + 'MDBLOCK';
+  });
   s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
   s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
   s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<i>$2</i>');
@@ -611,6 +621,7 @@ function mdToHtml(raw){
   s = out.join('');
   s = s.replace(/(<br>){2,}/g,'<br><br>');   // a blank source line + the prior line's own <br> -> one gap
   s = s.replace(/(<\/ul>|<\/ol>|<\/div>|<hr>)(<br>)+/g,'$1').replace(/(<br>)+(<ul>|<ol>|<div class="md-h">|<hr>)/g,'$2');
+  s = s.replace(/(<br>)?MDBLOCK(\d+)MDBLOCK(<br>)?/g, (_, __, i) => blocks[+i]);
   return s.replace(/(<br>)+$/,'');   // no trailing blank line at the end of the bubble
 }
 function toggleClamp(id, btn){
