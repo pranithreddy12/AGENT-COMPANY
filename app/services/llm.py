@@ -252,6 +252,29 @@ class EchoProvider:
         )
 
 
+def _to_anthropic_messages(messages: list[dict]) -> list[dict]:
+    """Anthropic's Messages API has no "tool" role — a tool result must be a "user" message
+    carrying a tool_result content block, matched back to the assistant's tool_use block by id.
+    runs.py's internal message list is provider-agnostic (role="tool", flat string content) so it
+    can also feed Ollama-family providers, which DO accept that shape loosely — Anthropic needs
+    real translation or every second turn of any tool-using run 400s. Messages runs.py never
+    tags (plain user/assistant text) pass through unchanged."""
+    out = []
+    for m in messages:
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            out.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.args}
+                for tc in m["tool_calls"]
+            ]})
+        elif m["role"] == "tool":
+            out.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": m.get("tool_call_id", ""), "content": m["content"]}
+            ]})
+        else:
+            out.append({"role": m["role"], "content": m["content"]})
+    return out
+
+
 class AnthropicProvider:
     """Real provider. Off the Phase 0 gate path — exercised only with a key present."""
 
@@ -285,7 +308,7 @@ class AnthropicProvider:
             model=self.model,
             max_tokens=max_tokens,
             system=system or "",
-            messages=[{"role": m["role"], "content": m["content"]} for m in messages],
+            messages=_to_anthropic_messages(messages),
             tools=api_tools or None,
         )
         text_parts, tool_calls = [], []

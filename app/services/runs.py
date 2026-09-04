@@ -108,8 +108,13 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
         if comp.stop_reason != "tool_use":
             return _finish(db, run, "succeeded", result={"text": comp.text})
 
-        # execute tool calls, feed results back
-        messages.append({"role": "assistant", "content": f"[tool_use {[tc.name for tc in comp.tool_calls]}]"})
+        # execute tool calls, feed results back. tool_calls carries the raw ToolCalls (id/name/args)
+        # alongside the placeholder text — Anthropic needs the real tool_use blocks (with matching
+        # ids) to build a valid follow-up turn; providers that don't care just ignore the extra key.
+        messages.append({
+            "role": "assistant", "content": f"[tool_use {[tc.name for tc in comp.tool_calls]}]",
+            "tool_calls": comp.tool_calls,
+        })
         for tc in comp.tool_calls:
             try:
                 result = tools.execute(db, run.org_id, grants, tc.name, tc.args)
@@ -122,6 +127,10 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
             # json.dumps, not str(): a Python dict repr ({'a': 'b'}) isn't valid JSON and reads as
             # ambiguous noise to a model, especially a weaker local one — this labels it clearly and
             # gives back parseable data instead of a data structure impersonating a user message.
-            messages.append({"role": "tool", "content": f"Tool '{tc.name}' result: {json.dumps(result)}"})
+            # tool_call_id lets Anthropic match this result back to the tool_use block that asked for it.
+            messages.append({
+                "role": "tool", "content": f"Tool '{tc.name}' result: {json.dumps(result)}",
+                "tool_call_id": tc.id,
+            })
 
     return _finish(db, run, "failed", error="max_turns exhausted")

@@ -279,3 +279,34 @@ def test_strip_narrated_tool_calls_ignores_unrelated_json_blocks():
     e.g. a deliverable that legitimately includes a JSON config example — and must survive untouched."""
     text = '# Config\n```json\n{"port": 8080, "debug": true}\n```\nUse this in prod.'
     assert llm.strip_narrated_tool_calls(text) == text
+
+
+# ---------- Anthropic has no "tool" role — internal tool messages must be translated ----------
+
+def test_anthropic_message_translation_has_no_bare_tool_role():
+    """runs.py's internal message shape (role='tool', flat string content) works loosely for the
+    Ollama-family providers but is invalid for Anthropic's actual API, which has no 'tool' role at
+    all. Before this fix, every second turn of any tool-using Anthropic run would 400."""
+    from app.services.llm import ToolCall, _to_anthropic_messages
+
+    tc = ToolCall(id="toolu_123", name="web_search", args={"query": "x"})
+    internal = [
+        {"role": "user", "content": "find x"},
+        {"role": "assistant", "content": "[tool_use ['web_search']]", "tool_calls": [tc]},
+        {"role": "tool", "content": "Tool 'web_search' result: {}", "tool_call_id": tc.id},
+    ]
+    out = _to_anthropic_messages(internal)
+
+    assert all(m["role"] in ("user", "assistant") for m in out)  # no bare "tool" role reaches the API
+    assert out[0] == {"role": "user", "content": "find x"}
+    assert out[1]["content"][0] == {"type": "tool_use", "id": "toolu_123", "name": "web_search", "input": {"query": "x"}}
+    result_block = out[2]["content"][0]
+    assert result_block["type"] == "tool_result"
+    assert result_block["tool_use_id"] == "toolu_123"  # matched back to the tool_use block that asked
+
+
+def test_anthropic_message_translation_leaves_plain_turns_untouched():
+    from app.services.llm import _to_anthropic_messages
+
+    internal = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    assert _to_anthropic_messages(internal) == internal
