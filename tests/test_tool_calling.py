@@ -227,3 +227,55 @@ def test_echo_provider_still_sees_the_echo_tool_for_its_own_deterministic_path(d
     run = runs.execute(db, runs.create_run(db, org_id, sam, "hello"))
     assert run.status == "succeeded"
     assert "hello" in run.result["text"]
+
+
+# ---------- narrated fake tool calls (weak local models) must not leak into the user-facing text ----------
+
+def test_ollama_strips_a_narrated_tool_call_but_keeps_the_real_prose(monkeypatch):
+    """Reproduces exactly what shipped live: qwen2.5-coder:14b wrote a real, good deliverable but
+    also narrated a web_search call as a fenced JSON block instead of really calling it (no
+    tool_calls in the actual API response). That block must be stripped; the real work must survive."""
+    import httpx
+
+    body_content = (
+        "## Planning\n- Define scope.\n\n"
+        '```json\n{\n  "type": "function",\n  "function": {\n    "name": "web_search",\n'
+        '    "arguments": {\n      "query": "landing page best practices",\n      "num": 5\n    }\n  }\n}\n```\n\n'
+        "## Design\n- Wireframes next."
+    )
+
+    def fake_post(url, json, timeout, headers):
+        body = {"choices": [{"message": {"content": body_content}}], "usage": {}}
+        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    p = llm.OllamaProvider(model="qwen2.5-coder:14b", base_url="http://localhost:11434")
+    comp = p.complete(system="", messages=[{"role": "user", "content": "plan it"}],
+                      tools=[{"name": "web_search", "input_schema": {}}], max_tokens=500)
+
+    assert "web_search" not in comp.text
+    assert "function" not in comp.text
+    assert "## Planning" in comp.text and "## Design" in comp.text
+    assert comp.stop_reason == "end"  # no real tool call happened, just narrated noise
+
+
+def test_ollama_leaves_real_prose_alone_when_no_fake_tool_call_present(monkeypatch):
+    import httpx
+
+    def fake_post(url, json, timeout, headers):
+        body = {"choices": [{"message": {"content": "A completely normal answer with no JSON in it."}}],
+                "usage": {}}
+        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    p = llm.OllamaProvider(model="qwen2.5:7b", base_url="http://localhost:11434")
+    comp = p.complete(system="", messages=[{"role": "user", "content": "hi"}],
+                      tools=[{"name": "web_search", "input_schema": {}}], max_tokens=50)
+    assert comp.text == "A completely normal answer with no JSON in it."
+
+
+def test_strip_narrated_tool_calls_ignores_unrelated_json_blocks():
+    """A fenced JSON block that ISN'T shaped like a tool call (no name+arguments) is real content —
+    e.g. a deliverable that legitimately includes a JSON config example — and must survive untouched."""
+    text = '# Config\n```json\n{"port": 8080, "debug": true}\n```\nUse this in prod.'
+    assert llm.strip_narrated_tool_calls(text) == text

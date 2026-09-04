@@ -4,6 +4,8 @@
 - AnthropicProvider: real. Imported lazily so `anthropic` + a key are optional until used.
 """
 
+import json
+import re
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -148,6 +150,28 @@ def extract_json_object(text: str) -> str:
             if depth == 0:
                 return text[start : i + 1]
     return text[start:]
+
+
+_FENCED_JSON_BLOCK = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def strip_narrated_tool_calls(content: str) -> str:
+    """Some local/quantized models don't reliably use real structured tool_calls through an
+    OpenAI-compatible endpoint — instead of calling a tool, they narrate what the call would look
+    like as a fenced JSON block sitting right inside otherwise-good prose (observed live: a real
+    deliverable with a stray {"type": "function", "function": {"name": "web_search", ...}} block
+    embedded in it). That block is noise, not content — strip it, but leave the surrounding prose
+    (the actual work) alone rather than discarding the whole turn."""
+    def repl(m: re.Match) -> str:
+        try:
+            data = json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            return m.group(0)
+        fn = data.get("function") if isinstance(data.get("function"), dict) else data
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str) and isinstance(fn.get("arguments"), dict):
+            return ""
+        return m.group(0)
+    return _FENCED_JSON_BLOCK.sub(repl, content).strip()
 
 
 def validate_plan(data: object) -> list[dict]:
@@ -417,6 +441,8 @@ class OllamaProvider:
         content, inp, out, tool_calls = self._chat(
             system, messages, max_tokens, tools=tools
         )
+        if not tool_calls and content and tools:
+            content = strip_narrated_tool_calls(content)
         stop_reason = "tool_use" if tool_calls else "end"
         return Completion(
             text=content or None,
