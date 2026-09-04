@@ -260,8 +260,17 @@ def _clip(text: str, cap: int) -> str:
 
 def _brief(task: Task, dept_name: str | None, context: str) -> str:
     """What the producing agent actually reads. Carries the acceptance criteria — the Critic judges
-    against them, so the agent must see the same bar — plus concrete-output rules and team context."""
-    b = f"Your department: {dept_name or 'General'}.\nYour task: {task.goal}"
+    against them, so the agent must see the same bar — plus concrete-output rules and team context.
+
+    Opens with today's real date: a model otherwise has no notion of "now" and falls back to its
+    training-cutoff year for any date/timeline it invents — wrong on every deliverable that names one."""
+    from datetime import date
+
+    b = (
+        f"Today's date is {date.today().isoformat()}. Any dates or timelines you write must be "
+        "grounded in this, not a guess.\n"
+        f"Your department: {dept_name or 'General'}.\nYour task: {task.goal}"
+    )
     if (task.acceptance_criteria or "").strip():
         b += (
             "\nAcceptance criteria — QA will hold your deliverable to exactly these, so meet every "
@@ -271,7 +280,9 @@ def _brief(task: Task, dept_name: str | None, context: str) -> str:
         "\nProduce ONE concrete, ready-to-use deliverable that satisfies every criterion: specific "
         "steps, real numbers and targets, named tactics and decisions. Never placeholders like "
         "[Company Name], [Insert X], [Date] or 'Example'; never generic advice; do not restate the "
-        "task or narrate — just deliver."
+        "task or narrate — just deliver. Write it in plain prose/markdown for a human to read — not a "
+        "raw JSON object or a code-fenced data dump, unless the task itself is literally asking for "
+        "structured data (like a config file)."
     )
     if context:
         b = (

@@ -7,6 +7,7 @@ between turns. Fails closed on any provider/tool/validation error.
 # ponytail: synchronous executor. State lives in DB rows, so dropping this behind a
 # Celery queue later is a local change — the FSM and events don't move.
 """
+import json
 import time
 from datetime import datetime, timezone
 
@@ -55,9 +56,14 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
         return _finish(db, run, "failed", error=f"provider init: {e}")
 
     grants = profile.tool_grants or []
+    # "echo" only exists so EchoProvider's deterministic finalize step has a tool to round-trip
+    # through — a real model has no legitimate reason to call a tool that just returns what it's
+    # given, and offering it as an option has produced garbled replies where the model calls it
+    # with its whole answer instead of just answering. Never advertise it outside Echo mode.
     tool_specs = [
         {"name": r.name, "description": r.description, "input_schema": r.input_schema}
         for r in tools.granted_tools(db, run.org_id, grants)
+        if r.name != "echo" or profile.provider == "echo"
     ]
 
     run.status = "running"
@@ -113,6 +119,9 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
                 db, org_id=run.org_id, trace_id=run.trace_id, run_id=run.id, actor_id=run.actor_id,
                 action="tool.call", target=tc.name, before={"args": tc.args}, after={"result": result},
             )
-            messages.append({"role": "tool", "content": str(result)})
+            # json.dumps, not str(): a Python dict repr ({'a': 'b'}) isn't valid JSON and reads as
+            # ambiguous noise to a model, especially a weaker local one — this labels it clearly and
+            # gives back parseable data instead of a data structure impersonating a user message.
+            messages.append({"role": "tool", "content": f"Tool '{tc.name}' result: {json.dumps(result)}"})
 
     return _finish(db, run, "failed", error="max_turns exhausted")

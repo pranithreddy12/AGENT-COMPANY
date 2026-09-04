@@ -183,3 +183,47 @@ def test_backfill_is_idempotent_and_doesnt_duplicate_the_registration(db):
     regs = list(db.scalars(select(ToolRegistration).where(
         ToolRegistration.org_id == org_id, ToolRegistration.name == "web_search")))
     assert len(regs) == 1
+
+
+# ---------- the pointless "echo" tool must never reach a real model ----------
+
+def test_a_real_provider_never_sees_the_echo_tool(db, monkeypatch):
+    """"echo" only exists so EchoProvider's deterministic finalize step has something to round-trip
+    through — it returns whatever text it's given, which is meaningless for a real model and has
+    caused real agents to route their whole answer through it instead of just answering. A real
+    provider must never even see it as an available tool."""
+    from app.models import Actor
+    from app.services import runs
+
+    org_id = _org(db)
+    sam = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Sam Sales Agent")).first()
+    prof = db.get(AgentProfile, sam.agent_profile_id)
+    prof.provider, prof.model = "mistral", "mistral-small-latest"
+    db.commit()
+
+    seen_tools = {}
+
+    class _FakeProvider:
+        def complete(self, *, system, messages, tools, max_tokens):
+            seen_tools["names"] = [t["name"] for t in tools]
+            from app.services.llm import Completion
+            return Completion(text="done", tool_calls=[], input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr(runs, "build_provider", lambda *a, **k: _FakeProvider())
+    runs.execute(db, runs.create_run(db, org_id, sam, "do the thing"))
+
+    assert "echo" not in seen_tools["names"]
+    assert "web_search" in seen_tools["names"]  # real tools still offered
+
+
+def test_echo_provider_still_sees_the_echo_tool_for_its_own_deterministic_path(db):
+    """The opposite: Echo mode (the default/demo provider) must keep seeing "echo" — its finalize
+    step depends on a tool that returns the text it was given verbatim."""
+    from app.models import Actor
+    from app.services import runs
+
+    org_id = _org(db)
+    sam = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Sam Sales Agent")).first()
+    run = runs.execute(db, runs.create_run(db, org_id, sam, "hello"))
+    assert run.status == "succeeded"
+    assert "hello" in run.result["text"]

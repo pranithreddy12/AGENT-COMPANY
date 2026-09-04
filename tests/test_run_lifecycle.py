@@ -26,7 +26,7 @@ def test_echo_run_succeeds_with_replayable_trace(db):
     run = runs.execute(db, runs.create_run(db, org.id, actor, "hello world"))
 
     assert run.status == "succeeded"
-    assert run.result["text"] == "echo: {'text': 'hello world'}"
+    assert run.result["text"] == 'echo: Tool \'echo\' result: {"text": "hello world"}'
     assert run.turns_used == 2  # tool call, then finalize
 
     evs = events.trace(db, run.trace_id)
