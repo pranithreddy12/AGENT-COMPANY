@@ -222,3 +222,136 @@ def test_recent_transcript_shows_speakers_in_order(db):
     )  # agent replies attributed
     assert "@mia draft the announcement" in t  # the request itself is included
     assert out["tasks"]  # sanity: mention still created work
+
+
+# ---------- a failed upstream task must never leak its error text as if it were real work ----------
+
+def test_gather_context_flags_a_failed_dependency_instead_of_leaking_its_error_text():
+    """art.content on a failed run IS the raw error message (see _run_and_review's fail-closed
+    branch) — feeding that to a downstream agent as "here's what your teammate produced" means it
+    silently tries to build on a crash message. It must see an explicit heads-up instead."""
+
+    class T:
+        def __init__(self, id, goal, dept, deps):
+            self.id, self.goal, self.department_id, self.depends_on = id, goal, dept, deps
+
+    dep = T("dep1", "Draft the pricing model", "d1", [])
+    task = T("t1", "Write the proposal", "d2", ["dep1"])
+    depts = {"d1": type("D", (), {"name": "Sales"})()}
+    failed_art = type("A", (), {"content": "model call: timed out", "needs_human": True})()
+
+    ctx = planning._gather_context(
+        db=None, project=None, task=task, tasks={"dep1": dep},
+        artifacts_by_task={"dep1": failed_art}, depts=depts, include_memory=False,
+    )
+    assert "model call: timed out" not in ctx  # the raw error never leaks as if it were content
+    assert "failed" in ctx and "Draft the pricing model" in ctx  # but the gap is named plainly
+
+
+def test_gather_context_still_shows_a_successful_dependencys_real_content():
+    """Confirms the needs_human check doesn't accidentally swallow normal, successful upstream work."""
+
+    class T:
+        def __init__(self, id, goal, dept, deps):
+            self.id, self.goal, self.department_id, self.depends_on = id, goal, dept, deps
+
+    dep = T("dep1", "Draft the pricing model", "d1", [])
+    task = T("t1", "Write the proposal", "d2", ["dep1"])
+    depts = {"d1": type("D", (), {"name": "Sales"})()}
+    ok_art = type("A", (), {"content": "Pricing: $99/mo tier, $299/mo enterprise.", "needs_human": False})()
+
+    ctx = planning._gather_context(
+        db=None, project=None, task=task, tasks={"dep1": dep},
+        artifacts_by_task={"dep1": ok_art}, depts=depts, include_memory=False,
+    )
+    assert "Pricing: $99/mo tier" in ctx
+
+
+# ---------- assignment must route around a demonstrably struggling agent, not just round-robin blindly ----------
+
+def _give_track_record(db, org_id, project_id, actor, *, needs_human=0, blocked=0, ok=0):
+    from app.models import Artifact, Task
+    for i in range(needs_human + blocked + ok):
+        t = Task(org_id=org_id, project_id=project_id, goal=f"seed task {i}",
+                 department_id=actor.department_id, assignee_actor_id=actor.id,
+                 status="done", est_effort_hours=1.0)
+        db.add(t)
+        db.flush()
+        nh, bl = i < needs_human, needs_human <= i < needs_human + blocked
+        db.add(Artifact(org_id=org_id, task_id=t.id, type="doc", version=1, content="x",
+                        produced_by_actor_id=actor.id, status="produced" if (nh or bl) else "reviewed",
+                        needs_human=nh, blocked=bl))
+    db.commit()
+
+
+def test_eligible_pool_skips_an_agent_with_a_real_track_record_of_escalating(db):
+    from app.models import Actor, Project
+
+    org_id = _org(db)
+    devin = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Devin Dev Agent")).first()
+    dana = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Dana Dev Agent")).first()
+    project = Project(org_id=org_id, goal="seed", status="active", health="on_track")
+    db.add(project)
+    db.flush()
+
+    _give_track_record(db, org_id, project.id, devin, needs_human=3)  # 3/3 escalated
+
+    pool = planning._eligible_pool(db, org_id, [devin, dana])
+    assert dana in pool and devin not in pool
+
+
+def test_eligible_pool_never_leaves_a_department_fully_unstaffed(db):
+    """If EVERY agent in a department is struggling, that's still better staffed than nobody —
+    the filter must fall back to the original pool rather than returning an empty one."""
+    from app.models import Actor, Project
+
+    org_id = _org(db)
+    devin = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Devin Dev Agent")).first()
+    dana = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Dana Dev Agent")).first()
+    project = Project(org_id=org_id, goal="seed", status="active", health="on_track")
+    db.add(project)
+    db.flush()
+
+    _give_track_record(db, org_id, project.id, devin, needs_human=3)
+    _give_track_record(db, org_id, project.id, dana, blocked=3)
+
+    pool = planning._eligible_pool(db, org_id, [devin, dana])
+    assert set(pool) == {devin, dana}
+
+
+def test_eligible_pool_does_not_penalize_a_single_bad_break(db):
+    """Below the 2-artifact minimum, one rough task must not permanently sideline an agent."""
+    from app.models import Actor, Project
+
+    org_id = _org(db)
+    devin = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Devin Dev Agent")).first()
+    dana = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Dana Dev Agent")).first()
+    project = Project(org_id=org_id, goal="seed", status="active", health="on_track")
+    db.add(project)
+    db.flush()
+
+    _give_track_record(db, org_id, project.id, devin, needs_human=1)  # only 1 data point
+
+    pool = planning._eligible_pool(db, org_id, [devin, dana])
+    assert devin in pool  # not enough history to judge yet
+
+
+def test_draft_project_routes_around_a_struggling_agent_end_to_end(db):
+    """The real path: draft_project's own assignment loop must actually use _eligible_pool, not
+    just have it sitting there unused. A goal that routes multiple tasks to Development must not
+    hand any of them to a Dev agent with a real track record of escalating."""
+    from app.models import Actor, Project
+
+    org_id = _org(db)
+    devin = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Devin Dev Agent")).first()
+    seed_project = Project(org_id=org_id, goal="seed", status="active", health="on_track")
+    db.add(seed_project)
+    db.flush()
+    _give_track_record(db, org_id, seed_project.id, devin, needs_human=3)
+    db.commit()
+
+    # the Echo demo plan routes 2 tasks to Development (t2 "Draft technical spec", t_test "Draft test plan")
+    project, tasks = planning.draft_project(db, org_id, "Deliver a client engagement")
+    dev_tasks = [t for t in tasks if t.department_id == devin.department_id]
+    assert dev_tasks  # sanity: Development actually got tasks routed to it
+    assert all(t.assignee_actor_id != devin.id for t in dev_tasks)

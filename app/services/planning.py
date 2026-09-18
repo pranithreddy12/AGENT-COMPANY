@@ -26,6 +26,7 @@ from app.services import (
     cost,
     communication,
     events,
+    intelligence,
     playbooks,
     research,
     review,
@@ -61,6 +62,23 @@ def _nodes(tasks: list[Task]) -> list[dict]:
 
 def _tasks(db: Session, project: Project) -> list[Task]:
     return list(db.scalars(select(Task).where(Task.project_id == project.id)))
+
+
+def _eligible_pool(db: Session, org_id: str, pool: list[Actor]) -> list[Actor]:
+    """Round-robin distributes load evenly across a department's agents, but "evenly" isn't the same
+    as "flexibly" — it keeps re-assigning work to an agent with a real track record of escalating or
+    getting blocked almost every time, while a healthier teammate in the same department sits idle.
+    intelligence.scorecard() already tracks exactly this per agent; nothing was reading it at
+    assignment time. Requires at least 2 completed artifacts before judging — one bad break shouldn't
+    permanently sideline someone — and never excludes every agent in a department (a struggling team
+    is still better than an unstaffed one)."""
+    healthy = []
+    for a in pool:
+        m = intelligence.scorecard(db, org_id, a)
+        if m["tasks_assigned"] >= 2 and (m["escalation_rate"] >= 0.75 or m["blocked_rate"] >= 0.75):
+            continue
+        healthy.append(a)
+    return healthy or pool
 
 
 def draft_project(
@@ -124,7 +142,7 @@ def draft_project(
         after={"n_tasks": len(pr.tasks)},
     )
 
-    # materialize: temp_id -> Task, wire deps, round-robin assign to the routed department's agents
+    # materialize: temp_id -> Task, wire deps, round-robin assign to the eligible routed department's agents
     id_map: dict[str, Task] = {}
     dev_agents: dict[str, list[Actor]] = {}
     for spec in pr.tasks:
@@ -146,10 +164,11 @@ def draft_project(
     for spec in pr.tasks:
         t = id_map[spec["temp_id"]]
         t.depends_on = [id_map[d].id for d in spec.get("depends_on", []) if d in id_map]
-        # assign a member agent of the routed department (round-robin)
+        # assign a member agent of the routed department — round-robin across whichever of them
+        # aren't demonstrably struggling right now (see _eligible_pool)
         dept_id = t.department_id
         if dept_id not in dev_agents:
-            dev_agents[dept_id] = list(
+            all_members = list(
                 db.scalars(
                     select(Actor).where(
                         Actor.org_id == org_id,
@@ -159,6 +178,7 @@ def draft_project(
                     )
                 )
             )
+            dev_agents[dept_id] = _eligible_pool(db, org_id, all_members)
         pool = dev_agents[dept_id]
         if pool:
             t.assignee_actor_id = pool[
@@ -394,11 +414,24 @@ def _gather_context(
     parts = []
     for dep_id in task.depends_on:
         dep, art = tasks.get(dep_id), artifacts_by_task.get(dep_id)
-        if dep and art and art.content:
-            name = depts[dep.department_id].name if dep.department_id in depts else "?"
+        if not (dep and art and art.content):
+            continue
+        name = depts[dep.department_id].name if dep.department_id in depts else "?"
+        if getattr(art, "needs_human", False):
+            # a failed run stores its error text as art.content (see _run_and_review's fail-closed
+            # branch) — that error message is NOT a deliverable. Feeding it as one silently poisons
+            # every downstream task with a crash message disguised as a teammate's real work; they'd
+            # read "model call: timed out" as if it were the actual upstream artifact and try to build
+            # on it. Say plainly that it failed instead of pretending it succeeded.
             parts.append(
-                f"[{name}] {dep.goal}:\n{_clip(art.content.strip(), _CONTEXT_ARTIFACT_CAP)}"
+                f"[{name}] {dep.goal}: this upstream deliverable failed and needs human review "
+                "— you don't have its output. Do not assume it succeeded; note the gap in your work "
+                "if it matters, rather than inventing what it might have said."
             )
+            continue
+        parts.append(
+            f"[{name}] {dep.goal}:\n{_clip(art.content.strip(), _CONTEXT_ARTIFACT_CAP)}"
+        )
     if include_memory:
         mem = list(
             db.scalars(
