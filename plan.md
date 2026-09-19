@@ -5,8 +5,8 @@ coordinated by a Lead, reviewed by a Critic, gated by governance) turns a goal i
 executes it, and produces reviewed deliverables — plus one hardened revenue path that turns a warm
 LeadForge lead into a signed proposal, and a real team chat where @mentioning an agent assigns it work.
 
-- **Repo:** https://github.com/pranithreddy12/AGENT-COMPANY — branch `main`, HEAD `1ba412c`, pushed
-- **Tests:** 130 passing (`pytest -q`), 26 test files
+- **Repo:** https://github.com/pranithreddy12/AGENT-COMPANY — branch `main` (see `git log`; latest work is the §12 audit)
+- **Tests:** 208 passing (`pytest -q`) as of the 2026-09-19 audit
 - **Stack:** FastAPI + SQLAlchemy 2.0 + SQLite (WAL) + Pydantic v2; single-file vanilla HTML/JS console. Python 3.11, no Node build, no frontend framework.
 
 ---
@@ -43,8 +43,8 @@ C:/Users/prani/AppData/Local/Programs/Python/Python311/python.exe -m uvicorn app
 Python 3.14 install with none of this project's dependencies — bit this repeatedly across sessions.
 
 **Ports 8000 and 8001 are occupied on this machine** by other local projects ("AI Business Operating
-System" and LeadForge AI). Company OS runs on **8010**. `startup.bat` still hardcodes 8000 and will
-fail to bind — unfixed, see §7.
+System" and LeadForge AI). Company OS runs on **8010**. Easiest start: `startup.bat` (auto-picks a free
+port, uses the project-local `venv/` on Python 3.11). Local models need Ollama running on :11434.
 
 - Console: http://127.0.0.1:8010/console — sign in with **email + password** (no token pasting)
 - API docs: http://127.0.0.1:8010/docs
