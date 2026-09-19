@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import Actor, AgentProfile, Artifact, Department, Message, Project, Task, Thread
-from app.services import agent_memory, communication, governance, llm, planning, runs
+from app.services import agent_memory, communication, company, governance, llm, planning, runs
 
 TEAM_THREAD_TYPE = "team"
 _CHAT_PROJECT_GOAL = "Team chat requests"
@@ -272,7 +272,7 @@ def run_chat_reply_in_background(org_id: str, actor_id: str, text: str) -> None:
         try:
             provider = runs.metered(db, org_id, agent, prof, "chat reply")
             system = (
-                f"{persona}\n\nYou're replying in a team chat, not producing a deliverable. Reply "
+                f"{persona}\n\n{company.company_context(db, org_id)}\n\nYou're replying in a team chat, not producing a deliverable. Reply "
                 "directly and briefly, in first person, grounded in the real conversation and your "
                 "own memory below — don't produce a formal document, just answer what was asked."
             )

@@ -222,3 +222,263 @@ def test_explain_error_gives_actionable_text():
     assert "too long" in llm.explain_error(httpx.ReadTimeout("t"))
     assert "Ollama" in llm.explain_error(httpx.ConnectError("refused"))
     assert llm.explain_error(ValueError("bad")) == "ValueError: bad"
+
+
+# ---------- external client accounts are not staff ----------
+
+def test_client_role_cannot_reach_internal_endpoints_but_staff_can():
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.auth import issue_token
+    from app.db import Base, get_db
+    from app.main import app
+    from app.models import Account, User
+
+    # StaticPool: TestClient serves requests on worker threads, and a plain in-memory SQLite gives
+    # every thread its own empty database
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def _override():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[get_db] = _override
+    try:
+        seed = Session()
+        r = create_org(OrgCreate(name="Http Co", ceo_email="ceo@a.com", ceo_password="pw"), seed)
+        acct = Account(org_id=r.org_id, name="Client Inc", is_client=True)
+        seed.add(acct)
+        seed.flush()
+        client_user = User(org_id=r.org_id, email="cl@x.com", pw_hash="x", role="client", account_id=acct.id)
+        seed.add(client_user)
+        seed.commit()
+        c = TestClient(app)
+        ch = {"authorization": f"Bearer {issue_token(client_user)}"}
+        sh = {"authorization": f"Bearer {r.access_token}"}
+
+        for path in ("/projects", "/departments", "/teamchat", "/approvals"):
+            assert c.get(path, headers=ch).status_code == 403, path  # was 200: internal data leaked
+            assert c.get(path, headers=sh).status_code == 200, path
+        assert c.post("/runs", headers=ch, json={"actor_id": "x", "input": "hi"}).status_code == 403
+        assert c.get("/portal/projects", headers=ch).status_code == 200  # the portal still works
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ---------- execution semantics: resume, one artifact per task, Legal on chat work ----------
+
+def _run_all(db, org_id):
+    project, tasks = planning.draft_project(db, org_id, "Deliver a client engagement")
+    db.commit()
+    planning.approve_project(db, project)
+    planning.execute_project(db, project)
+    return project, tasks
+
+
+def _count_worker_runs(monkeypatch):
+    n = {"runs": 0}
+    real = planning.runs.execute
+
+    def spy(db_, run, extra_system=""):
+        n["runs"] += 1
+        return real(db_, run, extra_system=extra_system)
+
+    monkeypatch.setattr(planning.runs, "execute", spy)
+    return n
+
+
+def test_rerunning_a_finished_project_does_not_redo_or_rebill_any_task(db, monkeypatch):
+    from app.models import Artifact
+
+    org_id = _org(db)
+    project, tasks = _run_all(db, org_id)
+    before = {a.task_id: (a.id, a.version) for a in db.scalars(select(Artifact))}
+    n = _count_worker_runs(monkeypatch)
+
+    planning.execute_project(db, project)  # "Run" pressed again
+
+    assert n["runs"] == 0  # every task was already done: nothing re-executed
+    assert {a.task_id: (a.id, a.version) for a in db.scalars(select(Artifact))} == before
+
+
+def test_resume_reruns_only_the_unfinished_task_and_keeps_one_artifact_per_task(db, monkeypatch):
+    from app.models import Artifact
+
+    org_id = _org(db)
+    project, tasks = _run_all(db, org_id)
+    victim = tasks[2]
+    art = db.scalars(select(Artifact).where(Artifact.task_id == victim.id)).first()
+    victim.status, art.needs_human = "blocked", True  # e.g. it failed last time
+    db.commit()
+    n = _count_worker_runs(monkeypatch)
+
+    planning.execute_project(db, project)
+
+    assert n["runs"] == 1  # only the blocked task ran again
+    arts = list(db.scalars(select(Artifact).where(Artifact.task_id == victim.id)))
+    assert len(arts) == 1 and arts[0].version >= 2  # same row, version bumped - no stale duplicate
+    assert not arts[0].needs_human
+
+
+def test_a_paused_run_stops_cleanly_and_says_so(db, monkeypatch):
+    org_id = _org(db)
+    project, tasks = planning.draft_project(db, org_id, "Deliver a client engagement")
+    db.commit()
+    planning.approve_project(db, project)
+    db.get(Organization, org_id).killed = True
+    db.commit()
+    n = _count_worker_runs(monkeypatch)
+
+    planning.execute_project(db, project)
+
+    assert n["runs"] == 0
+    msgs = [m.content for m in db.scalars(select(Message))]
+    assert any("Run paused" in m and "kill switch" in m for m in msgs)
+    assert all(t.status != "done" for t in tasks)  # and nothing pretends to be finished
+
+
+def test_chat_assigned_work_gets_the_legal_screen(db):
+    org_id = _org(db)
+    out = teamchat.post(db, org_id, "@sam write copy promising guaranteed returns to investors")
+    db.commit()
+    task = db.get(Task, out["tasks"][0]["task_id"])
+    project = db.get(planning.Project, task.project_id)
+
+    art = planning.rerun_task(db, project, task)
+
+    assert art.blocked and "guaranteed returns" in art.block_reason
+    assert task.status == "blocked"
+    assert teamchat._summary(art, request=task.goal).startswith("Legal blocked this")
+
+
+# ---------- plan sanity ----------
+
+def test_absurd_model_effort_estimates_are_clamped_before_scheduling(db, monkeypatch):
+    org_id = _org(db)
+
+    class _P:
+        def plan(self, *, goal, departments, max_tokens):
+            from app.services.llm import PlanResult
+            return PlanResult(tasks=[
+                {"temp_id": "a", "goal": "zero", "department": "Sales", "est_effort_hours": 0, "depends_on": []},
+                {"temp_id": "b", "goal": "neg", "department": "Sales", "est_effort_hours": -5, "depends_on": ["a"]},
+                {"temp_id": "c", "goal": "huge", "department": "Sales", "est_effort_hours": 9999, "depends_on": ["b"]},
+            ], input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr(planning, "build_provider", lambda *a, **k: _P())
+    _project, tasks = planning.draft_project(db, org_id, "goal")
+    assert [t.est_effort_hours for t in tasks] == [0.25, 0.25, 200.0]
+
+
+def test_a_plan_with_too_many_tasks_is_rejected_so_the_model_replans_smaller():
+    import pytest
+
+    from app.services.llm import MAX_PLAN_TASKS, PlanParseError, validate_plan
+
+    many = [{"temp_id": f"t{i}", "goal": "g", "department": "Sales", "est_effort_hours": 1, "depends_on": []}
+            for i in range(MAX_PLAN_TASKS + 1)]
+    with pytest.raises(PlanParseError, match="at most"):
+        validate_plan({"tasks": many})
+
+
+# ---------- agents know the company they work for ----------
+
+def test_every_task_brief_names_the_company_and_carries_its_profile(db, monkeypatch):
+    org_id = _org(db)  # org is named "Acme"
+    db.get(Organization, org_id).profile = "We sell Instagram lead-gen to med-spas from $1.2k/month."
+    db.commit()
+    project, tasks = planning.draft_project(db, org_id, "Deliver a client engagement")
+    db.commit()
+    planning.approve_project(db, project)
+    seen = []
+    real = planning.runs.execute
+
+    def spy(db_, run, extra_system=""):
+        seen.append(run.trigger)
+        return real(db_, run, extra_system=extra_system)
+
+    monkeypatch.setattr(planning.runs, "execute", spy)
+    planning.execute_project(db, project)
+
+    assert seen and all("Acme" in t and "med-spas from $1.2k/month" in t for t in seen)
+    assert all("never [Company Name]" in t for t in seen)  # and the instruction not to placeholder it
+
+
+def test_company_context_works_without_a_profile_and_bounds_a_huge_one(db):
+    from app.services import company
+
+    org_id = _org(db)
+    assert "Acme" in company.company_context(db, org_id)  # the name alone removes [Company Name]
+    db.get(Organization, org_id).profile = "x" * 50_000
+    db.commit()
+    assert len(company.company_context(db, org_id)) < company.PROFILE_MAX_CHARS + 500  # bounded in prompts
+    assert company.company_context(db, "no-such-org") == ""
+
+
+def test_chat_replies_are_told_the_company(db, monkeypatch):
+    org_id = _org(db)
+    db.get(Organization, org_id).profile = "Boutique consultancy for dentists."
+    mia = _actor(db, org_id, "Mia Marketing Agent")
+    _go_real(db, mia)
+    seen = {}
+
+    class _P:
+        def complete(self, **kw):
+            seen["system"] = kw["system"]
+            return Completion(text="hi", input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr(llm, "build_provider", lambda *a, **k: _P())
+    monkeypatch.setattr(teamchat, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)
+    teamchat.run_chat_reply_in_background(org_id, mia.id, "what do we do?")
+    assert "Acme" in seen["system"] and "Boutique consultancy for dentists." in seen["system"]
+
+
+def test_profile_api_roundtrip_is_ceo_only_and_length_bounded():
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.auth import issue_token
+    from app.db import Base, get_db
+    from app.main import app
+    from app.models import User
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def _override():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[get_db] = _override
+    try:
+        seed = Session()
+        r = create_org(OrgCreate(name="Http Co", ceo_email="ceo@a.com", ceo_password="pw"), seed)
+        member = User(org_id=r.org_id, email="m@a.com", pw_hash="x", role="member")
+        seed.add(member)
+        seed.commit()
+        c = TestClient(app)
+        ceo = {"authorization": f"Bearer {r.access_token}"}
+        mem = {"authorization": f"Bearer {issue_token(member)}"}
+
+        assert c.post("/settings/profile", headers=ceo, json={"profile": "We sell widgets."}).json()["saved"]
+        got = c.get("/settings/profile", headers=mem).json()  # any staff can read it
+        assert got["profile"] == "We sell widgets." and got["name"] == "Http Co"
+        assert c.post("/settings/profile", headers=mem, json={"profile": "hax"}).status_code == 403
+        assert c.post("/settings/profile", headers=ceo, json={"profile": "x" * 4001}).status_code == 422
+    finally:
+        app.dependency_overrides.clear()

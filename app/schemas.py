@@ -335,3 +335,7 @@ class LLMSettingsIn(BaseModel):
     provider: str  # echo|ollama|mistral|openrouter|anthropic
     model: str
     api_key: str | None = None  # blank/omitted keeps whatever key is already configured
+
+
+class ProfileIn(BaseModel):
+    profile: str = ""

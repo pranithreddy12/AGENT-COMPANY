@@ -42,6 +42,9 @@ class Organization(Base):
     llm_provider: Mapped[str | None] = mapped_column(String, nullable=True)
     llm_model: Mapped[str | None] = mapped_column(String, nullable=True)
     llm_api_keys: Mapped[dict] = mapped_column(JSON, default=dict)  # {provider: key}
+    # free-text "about this company" (what it sells, to whom, tone, current clients/offers). Injected
+    # into every agent's brief so deliverables use real specifics instead of [Company Name] placeholders.
+    profile: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 

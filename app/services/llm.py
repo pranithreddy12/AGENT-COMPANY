@@ -135,6 +135,9 @@ class PlanParseError(Exception):
     pass
 
 
+MAX_PLAN_TASKS = 30
+
+
 def extract_json_object(text: str) -> str:
     """Pull the first balanced {...} object out of a model response — local models often wrap JSON
     in prose or ```json fences. Brace-matched, not regex, so nested objects survive."""
@@ -184,6 +187,8 @@ def validate_plan(data: object) -> list[dict]:
     ):
         raise PlanParseError("missing non-empty 'tasks' array")
     tasks = data["tasks"]
+    if len(tasks) > MAX_PLAN_TASKS:  # triggers the parse-retry with this message so it re-plans smaller
+        raise PlanParseError(f"plan has {len(tasks)} tasks; at most {MAX_PLAN_TASKS} - merge related work")
     seen: set[str] = set()
     for t in tasks:
         if not isinstance(t, dict):

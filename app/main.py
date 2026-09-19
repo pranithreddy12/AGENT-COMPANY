@@ -111,6 +111,15 @@ def _backfill_agent_personas() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.config import settings as _cfg
+
+    if _cfg.jwt_secret.startswith("dev-secret-change-me"):
+        import logging
+
+        logging.getLogger("uvicorn.error").warning(
+            "JWT_SECRET is the built-in dev default: anyone who reads the source can forge a login. "
+            "Fine on localhost; set JWT_SECRET in .env before exposing this to a network."
+        )
     init_db()
     _recover_stuck_executions()
     _backfill_web_search()

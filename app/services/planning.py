@@ -23,6 +23,7 @@ from app.models import (
 )
 from app.services import (
     agent_memory,
+    company,
     cost,
     communication,
     events,
@@ -125,8 +126,10 @@ def draft_project(
         profile.provider, profile.model, resolve_api_key(db, org_id, profile.provider)
     )
     try:
+        ctx = company.company_context(db, org_id)
         pr = provider.plan(
-            goal=goal, departments=list(depts), max_tokens=max(profile.max_tokens, 4096)
+            goal=f"{goal}\n\n{ctx}" if ctx else goal,  # the project keeps the user's own wording
+            departments=list(depts), max_tokens=max(profile.max_tokens, 4096),
         )
     except Exception as e:  # fail closed
         runs._finish(db, run, "failed", error=f"plan: {e}")
@@ -157,7 +160,8 @@ def draft_project(
             goal=spec["goal"],
             acceptance_criteria=spec.get("acceptance_criteria", ""),
             department_id=dept.id,
-            est_effort_hours=float(spec["est_effort_hours"]),
+            # a model can emit 0, a negative or an absurd estimate; those wreck the critical-path math
+            est_effort_hours=max(0.25, min(float(spec["est_effort_hours"]), 200.0)),
             depends_on=[],
             status="proposed",
         )
@@ -281,7 +285,7 @@ def _clip(text: str, cap: int) -> str:
     return text[: cut if cut > cap // 2 else cap] + "\n…[continued]"
 
 
-def _brief(task: Task, dept_name: str | None, context: str) -> str:
+def _brief(task: Task, dept_name: str | None, context: str, company_ctx: str = "") -> str:
     """What the producing agent actually reads. Carries the acceptance criteria — the Critic judges
     against them, so the agent must see the same bar — plus concrete-output rules and team context.
 
@@ -294,6 +298,8 @@ def _brief(task: Task, dept_name: str | None, context: str) -> str:
         "grounded in this, not a guess.\n"
         f"Your department: {dept_name or 'General'}.\nYour task: {task.goal}"
     )
+    if company_ctx:
+        b = company_ctx + "\n\n" + b
     if (task.acceptance_criteria or "").strip():
         b += (
             "\nAcceptance criteria — QA will hold your deliverable to exactly these, so meet every "
@@ -332,18 +338,21 @@ def _run_and_review(
         else None
     )
     playbook = active_pb.markdown if active_pb else ""
-    art = Artifact(
-        org_id=project.org_id,
-        task_id=task.id,
-        type="doc",
-        version=0,
-        produced_by_actor_id=actor.id,
-        status="produced",
-        playbook_version=active_pb.version if active_pb else None,
-    )
-    db.add(art)
+    # ONE artifact per task. Every re-run used to stack a brand-new Artifact on the task, leaving a
+    # stale/failed one beside the fresh one — and rerun_task then picked "the" artifact for downstream
+    # context arbitrarily, so a later task could read the OLD failed draft. Re-running reuses the row
+    # (version keeps counting, which is exactly what the scorecard's rework rate wants).
+    art = db.scalars(
+        select(Artifact).where(Artifact.task_id == task.id).order_by(Artifact.created_at.desc())
+    ).first()
+    if art is None:
+        art = Artifact(org_id=project.org_id, task_id=task.id, type="doc", version=0)
+        db.add(art)
+    art.produced_by_actor_id, art.status = actor.id, "produced"
+    art.playbook_version = active_pb.version if active_pb else None
+    art.needs_human, art.blocked, art.block_reason, art.critic_reasons = False, False, None, None
 
-    brief = _brief(task, dept.name if dept else None, context)
+    brief = _brief(task, dept.name if dept else None, context, company.company_context(db, project.org_id))
 
     feedback = ""
     for _ in range(MAX_REVISE_CYCLES + 1):  # initial attempt + N revises
@@ -598,6 +607,17 @@ def _announce_done(
     )
 
 
+def _legal_screen(art: Artifact) -> None:
+    """The coarse Legal keyword veto, applied to one produced artifact. Chat-assigned work never met
+    it (only a Legal-department task in a full project did), although the UI says every chat request
+    "runs through Critic + Legal". A failed run's error text is not a deliverable, so it isn't screened."""
+    if not art.content or art.needs_human:
+        return
+    v = review.legal_review(art.content)
+    if not v.passed:
+        art.blocked, art.block_reason = True, "; ".join(v.reasons)
+
+
 def rerun_task(
     db: Session,
     project: Project,
@@ -621,7 +641,7 @@ def rerun_task(
         {
             a.task_id: a
             for a in db.scalars(
-                select(Artifact).where(Artifact.task_id.in_(list(tasks)))
+                select(Artifact).where(Artifact.task_id.in_(list(tasks))).order_by(Artifact.created_at)
             )
         }
         if tasks
@@ -633,8 +653,9 @@ def rerun_task(
     if extra_context:
         context = f"{context}\n\n{extra_context}".strip()
     art = _run_and_review(db, project, task, critic, context=context)
-    task.status = "done" if not art.needs_human else "blocked"
-    if not art.needs_human and art.content:
+    _legal_screen(art)
+    task.status = "done" if not (art.needs_human or art.blocked) else "blocked"
+    if not art.needs_human and not art.blocked and art.content:
         _remember_for_agent(db, project, task, art)  # chat-assigned work builds the agent's history too
     db.commit()
     return art
@@ -654,7 +675,17 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
     }
     critic = _critic_actor(db, project.org_id)
     artifacts_by_task: dict[str, Artifact] = {}
-    _kickoff(db, project, tasks, order, actors)  # the Lead opens the team chat
+    # Resume, don't restart: "Run" after a partial failure used to re-execute EVERY task — re-billing
+    # finished work and re-announcing it. A task already done with a clean artifact keeps that
+    # artifact (downstream tasks still read it as context); only unfinished/blocked tasks run again.
+    already_done: set[str] = set()
+    for a in db.scalars(select(Artifact).where(Artifact.task_id.in_(list(tasks))).order_by(Artifact.created_at)):
+        t0 = tasks[a.task_id]
+        if t0.status == "done" and not a.needs_human and not a.blocked and a.content:
+            artifacts_by_task[t0.id] = a
+            already_done.add(t0.id)
+    if not already_done:  # a resume must not re-announce the opening moves of work already delivered
+        _kickoff(db, project, tasks, order, actors)  # the Lead opens the team chat
 
     # Research agent goes first: web search on the goal -> sourced brief in shared memory for everyone
     rsummary = research.run_research(db, project)
@@ -664,8 +695,14 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
 
     for tid in order:
         t = tasks[tid]
-        if t.assignee_actor_id is None:
+        if t.assignee_actor_id is None or tid in already_done:
             continue
+        blocked_now = governance.run_block_reason(db, project.org_id, t.department_id)
+        if blocked_now:
+            # kill switch / paused department / budget: stop the whole run here instead of failing
+            # every remaining task one by one. Nothing is lost - re-running resumes from this task.
+            _post(db, project, None, f"Run paused: {blocked_now}. Resume by running the project again.")
+            break
         _announce_start(
             db, project, t, tasks, actors
         )  # agent acknowledges upstream, in the chat
@@ -704,6 +741,7 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
                 db, project, t, art, tasks, actors
             )  # agent reports back in the chat, hands off
 
+        _legal_screen(art)
         # Legal veto: a Legal task blocks any already-produced artifact with prohibited content.
         if depts.get(t.department_id) and depts[t.department_id].name == "Legal":
             for other in artifacts_by_task.values():
@@ -711,7 +749,7 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
                 if not v.passed:
                     other.blocked, other.block_reason = True, "; ".join(v.reasons)
 
-        t.status = "done" if not art.needs_human else "blocked"
+        t.status = "done" if not (art.needs_human or art.blocked) else "blocked"
 
     # a Legal-blocked artifact keeps its task (and the project) out of "done" — the veto actually blocks
     for tid, art in artifacts_by_task.items():

@@ -50,6 +50,8 @@ def _migrate_sqlite() -> None:
         for col in ("llm_provider", "llm_model"):
             if col not in org_cols:
                 conn.exec_driver_sql(f"ALTER TABLE organizations ADD COLUMN {col} VARCHAR")
+        if "profile" not in org_cols:
+            conn.exec_driver_sql("ALTER TABLE organizations ADD COLUMN profile TEXT")
         if "llm_api_keys" not in org_cols:
             # JSON column: existing rows get NULL, not '{}' — every reader treats that as "no keys yet".
             conn.exec_driver_sql("ALTER TABLE organizations ADD COLUMN llm_api_keys TEXT")

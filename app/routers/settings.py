@@ -7,8 +7,8 @@ from app.auth import Principal, current_principal, require_role
 from app.config import settings
 from app.db import get_db
 from app.models import Organization
-from app.schemas import LLMSettingsIn
-from app.services import llm
+from app.schemas import LLMSettingsIn, ProfileIn
+from app.services import company, llm
 
 router = APIRouter(tags=["settings"])
 
@@ -51,3 +51,26 @@ def set_llm_settings(body: LLMSettingsIn, db: Session = Depends(get_db),
         raise HTTPException(status_code=422, detail=str(e))
     db.commit()
     return {"provider": body.provider, "model": body.model.strip(), "saved": True}
+
+
+@router.get("/settings/profile")
+def get_profile(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> dict:
+    org = db.get(Organization, p.org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    return {"name": org.name, "profile": org.profile or "", "max_chars": company.PROFILE_MAX_CHARS}
+
+
+@router.post("/settings/profile")
+def set_profile(body: ProfileIn, db: Session = Depends(get_db),
+                p: Principal = Depends(require_role("ceo"))) -> dict:
+    """What the agents are told about this company. Bounded because it rides in every prompt."""
+    org = db.get(Organization, p.org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    text = body.profile.strip()
+    if len(text) > company.PROFILE_MAX_CHARS:
+        raise HTTPException(status_code=422, detail=f"profile is too long (max {company.PROFILE_MAX_CHARS} characters)")
+    org.profile = text or None
+    db.commit()
+    return {"saved": True, "chars": len(text)}

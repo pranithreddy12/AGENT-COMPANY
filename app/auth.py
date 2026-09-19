@@ -63,11 +63,23 @@ def _principal_from_token(token: str, db: Session) -> Principal:
     return Principal(user.id, user.org_id, user.role)
 
 
-def current_principal(
+def any_principal(
     creds: HTTPAuthorizationCredentials = Depends(_bearer),
     db: Session = Depends(get_db),
 ) -> Principal:
+    """Any authenticated user of the org, INCLUDING external client accounts. Only the client portal
+    (require_role("client")) should build on this directly."""
     return _principal_from_token(creds.credentials, db)
+
+
+def current_principal(p: Principal = Depends(any_principal)) -> Principal:
+    """The authenticated STAFF user (ceo / dept_head / member). Client-role users are external
+    customers with a login for the portal; they were previously accepted by every endpoint that used
+    this dependency, so a client could read all internal projects and artifacts of the org, run
+    agents (spending its budget) and execute projects. Staff-only is now the default."""
+    if p.role == "client":
+        raise HTTPException(status_code=403, detail="client accounts can only use the client portal")
+    return p
 
 
 def hash_secret(secret: str) -> str:
@@ -95,7 +107,7 @@ def leadforge_principal(request: Request, db: Session = Depends(get_db)) -> Prin
 
 
 def require_role(*roles: str):
-    def dep(p: Principal = Depends(current_principal)) -> Principal:
+    def dep(p: Principal = Depends(any_principal)) -> Principal:
         if p.role not in roles:
             raise HTTPException(status_code=403, detail=f"requires role in {roles}")
         return p

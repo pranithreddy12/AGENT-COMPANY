@@ -1018,6 +1018,7 @@ V.controls = async () => {
   el.append($(`<div class="panel"><div class="h-row"><h2>Decision queue</h2>${appr.length?`<span class="badge" style="margin-left:9px">${appr.length}</span>`:''}</div>
     <div id="appr">${renderApprovals(appr)}</div></div>`));
   el.append($(await llmPanel()));
+  el.append($(await profilePanel()));
   el.append($(`<div class="panel"><h2>Kill switch &amp; simulation</h2>
     <div class="kv" style="margin:14px 0">Global halt: ${s.controls.killed?badge('blocked'):badge('active')} &nbsp; Simulation: ${s.controls.simulation?badge('running'):'<span class="badge">off</span>'}</div>
     <div class="row">
@@ -1066,6 +1067,27 @@ async function llmPanel(){
       cfg.provider?esc(cfg.provider)+' / '+esc(cfg.model):'not configured — each agent keeps its own default'}</b></div>
     ${envNote?`<div class="faint" style="margin-top:6px">${envNote}</div>`:''}
   </div>`;
+}
+async function profilePanel(){
+  const c = await api('GET','/settings/profile').catch(()=>null);
+  if(!c) return `<div class="panel"><h2>Company profile</h2>${empty('Could not load the company profile.')}</div>`;
+  return `<div class="panel"><h2>Company profile — what your agents know about you</h2>
+    <p class="muted" style="margin:14px 0">Agents only know <b>${esc(c.name)}</b> unless you tell them more. Describe what
+      you sell, who to, your tone, current offers or clients. This goes into every agent's brief, so their work uses your
+      real details instead of <code>[Company Name]</code> placeholders (which QA rejects).</p>
+    <textarea id="co-profile" rows="6" maxlength="${c.max_chars}" style="width:100%;resize:vertical"
+      placeholder="e.g. We are a 6-person med-spa marketing agency in Dubai. We sell Instagram-led lead generation to clinics, from $1.2k/month. Tone: warm, direct, no hype.">${esc(c.profile)}</textarea>
+    <div class="row" style="margin-top:12px"><button class="btn btn-primary" onclick="saveProfile()">Save profile</button></div>
+    <div class="faint" id="co-msg" style="margin-top:10px"></div></div>`;
+}
+async function saveProfile(){
+  const msg = document.getElementById('co-msg');
+  msg.textContent = 'Saving…';
+  try{
+    await api('POST','/settings/profile',{profile: document.getElementById('co-profile').value});
+    toast('Company profile saved — agents will use it on their next task','ok');
+    msg.textContent = '';
+  }catch(e){ msg.textContent = 'Error '+(e.status||'')+': '+(e.detail||''); }
 }
 function onLlmProviderChange(){
   const provider = document.getElementById('llm-provider').value;
