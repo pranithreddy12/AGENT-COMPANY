@@ -34,3 +34,17 @@ def compute(model: str, input_tokens: int, output_tokens: int) -> float:
         raise UnknownModelError(model)  # fail closed: no silent $0 fallback
     in_rate, out_rate = RATES[model]
     return round((input_tokens * in_rate + output_tokens * out_rate) / 1_000_000, 6)
+
+
+# What an unlisted paid model is billed at for budgeting: deliberately opus-class, so the org cap
+# OVER-counts rather than lets an unpriced model spend for free.
+DEFAULT_RATE = (15.0, 75.0)
+
+
+def compute_or_default(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Like compute(), but an unlisted model is billed at DEFAULT_RATE instead of raising. compute()
+    failing closed AFTER a paid call threw away a good completion and failed the task with a bare
+    model name as the error — unusable for anyone trying a model that isn't in RATES yet. The budget
+    stays protected (the default over-estimates); the run no longer dies for it."""
+    in_rate, out_rate = RATES.get(model, DEFAULT_RATE)
+    return round((input_tokens * in_rate + output_tokens * out_rate) / 1_000_000, 6)

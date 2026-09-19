@@ -11,6 +11,9 @@ from dataclasses import dataclass
 class Verdict:
     passed: bool
     reasons: list[str]
+    # True when the JUDGE failed (unparseable reply), not the work. The caller must not send the
+    # producing agent back to revise something nobody actually critiqued.
+    error: bool = False
 
 
 _CRITIC_SYSTEM = (
@@ -33,7 +36,7 @@ def parse_critic_verdict(text: str) -> Verdict:
         passed = bool(data["passed"])
         reasons = [str(r) for r in data.get("reasons", [])]
     except (json.JSONDecodeError, KeyError, TypeError):
-        return Verdict(False, ["critic response unparseable — escalating for revision"])
+        return Verdict(False, ["QA review unavailable: the critic's reply could not be parsed"], error=True)
     return Verdict(passed, [] if passed else (reasons or ["revision requested"]))
 
 
@@ -41,9 +44,21 @@ def llm_critic_review(provider, content: str, acceptance_criteria: str, playbook
     """Real Critic: an LLM judges the artifact. Same Verdict interface as the deterministic critic."""
     rubric = (f"Acceptance criteria: {acceptance_criteria}\n\nPlaybook:\n{playbook}\n\n"
               f"Artifact under review:\n{content}")
-    comp = provider.complete(system=_CRITIC_SYSTEM, messages=[{"role": "user", "content": rubric}],
-                             tools=[], max_tokens=max_tokens)
-    return parse_critic_verdict(comp.text or "")
+    from app.services.llm import complete_with_retry
+
+    messages = [{"role": "user", "content": rubric}]
+    verdict = Verdict(False, [], error=True)
+    for _ in range(2):  # weak models often wrap or garble the JSON once; one stricter retry fixes most
+        comp = complete_with_retry(provider, system=_CRITIC_SYSTEM, messages=messages, tools=[],
+                                   max_tokens=max_tokens)
+        verdict = parse_critic_verdict(comp.text or "")
+        if not verdict.error:
+            return verdict
+        messages = messages + [
+            {"role": "assistant", "content": comp.text or ""},
+            {"role": "user", "content": 'Reply with ONLY a JSON object: {"passed": true|false, "reasons": []}.'},
+        ]
+    return verdict
 
 
 def critic_review(content: str, acceptance_criteria: str, playbook: str) -> Verdict:

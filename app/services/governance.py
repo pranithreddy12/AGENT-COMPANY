@@ -19,6 +19,11 @@ ALWAYS_APPROVAL = {"client_send", "publish", "contract_send", "spend", "delete"}
 _AUTONOMY_RANK = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
 
 
+class Blocked(Exception):
+    """An agent tried to spend model calls while the kill switch / a department pause / the budget
+    cap says it must not. The message is the human-readable reason."""
+
+
 class Denied(Exception):
     def __init__(self, reason: str, rule: str | None = None):
         super().__init__(reason)
@@ -39,6 +44,30 @@ def spent(db: Session, org_id: str) -> float:
 
 def remaining_budget(db: Session, org: Organization) -> float:
     return org.cost_cap_usd - spent(db, org.id)
+
+
+def run_block_reason(db: Session, org_id: str, department_id: str | None = None) -> str | None:
+    """Why an agent must NOT do model work right now, or None if it may. evaluate() only guards
+    OUTBOUND sends; without this, the kill switch, a department pause and the org budget cap did
+    nothing to agents actually working — the console said "killed" while they kept spending. Every
+    model call an agent makes goes through a check of this. Refreshes the rows first: background
+    workers hold long-lived sessions whose cached org/department would otherwise miss a kill flipped
+    by a request seconds ago."""
+    org = db.get(Organization, org_id)
+    if org is None:
+        return "organization not found"
+    db.refresh(org)
+    if org.killed:
+        return "the global kill switch is active"
+    if department_id:
+        dept = db.get(Department, department_id)
+        if dept is not None:
+            db.refresh(dept)
+            if dept.paused:
+                return f"the {dept.name} department is paused"
+    if remaining_budget(db, org) <= 0:
+        return f"the org budget cap (${org.cost_cap_usd:g}) is used up"
+    return None
 
 
 def _match(condition: dict, action_type: str, content: str) -> bool:

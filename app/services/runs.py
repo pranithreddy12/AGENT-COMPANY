@@ -14,8 +14,9 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models import Actor, AgentProfile, AgentRun
-from app.services import cost, events, tools
-from app.services.llm import Completion, build_provider, resolve_api_key
+from app.config import settings
+from app.services import cost, events, governance, llm, tools
+from app.services.llm import Completion, build_provider, complete_with_retry, explain_error, resolve_api_key
 
 
 class RunError(Exception):
@@ -42,6 +43,46 @@ def _finish(db: Session, run: AgentRun, status: str, *, result=None, error=None)
     return run
 
 
+class MeteredProvider:
+    """Wraps a provider so a model call made OUTSIDE runs.execute — the Critic, chat replies, intent
+    classification, memory summaries, research, proposals — is still governed and counted.
+
+    Before this, only task runs wrote cost anywhere, so the org's "Spent $X of $100 cap" ignored every
+    one of those calls (several per task), and the kill switch / budget cap didn't stop them either.
+    Each call checks governance first (raises governance.Blocked) and records an AgentRun row whose
+    cost_usd feeds governance.spent(). Callers wrap this in llm.complete_with_retry for retries."""
+
+    def __init__(self, provider, db: Session, org_id: str, actor_id: str | None, model: str, label: str,
+                 department_id: str | None = None):
+        self._p, self._db, self._org, self._actor = provider, db, org_id, actor_id
+        self._model, self._label, self._dept = model, label, department_id
+
+    def complete(self, **kwargs) -> Completion:
+        reason = governance.run_block_reason(self._db, self._org, self._dept)
+        if reason:
+            raise governance.Blocked(reason)
+        comp = self._p.complete(**kwargs)
+        # accounting must never break the call it is accounting for
+        step = cost.compute_or_default(self._model, getattr(comp, "input_tokens", 0) or 0,
+                                       getattr(comp, "output_tokens", 0) or 0)
+        now = datetime.now(timezone.utc)
+        if self._actor:  # AgentRun.actor_id is NOT NULL — an actor-less call can't be recorded
+            self._db.add(AgentRun(
+                org_id=self._org, actor_id=self._actor, trigger=self._label, status="succeeded",
+                turns_used=1, cost_usd=step, started_at=now, ended_at=now,
+            ))
+            self._db.flush()
+        return comp
+
+
+def metered(db: Session, org_id: str, actor: Actor | None, profile: AgentProfile, label: str) -> MeteredProvider:
+    """Build the provider for `profile` (its own key/model resolution) wrapped for governance + cost."""
+    # via the llm module (not the names imported above) so patching llm.build_provider reaches this too
+    provider = llm.build_provider(profile.provider, profile.model, llm.resolve_api_key(db, org_id, profile.provider))
+    return MeteredProvider(provider, db, org_id, actor.id if actor else None, profile.model, label,
+                           actor.department_id if actor else None)
+
+
 def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
     """extra_system is composed into the model's system prompt for this run — this is how the
     active Playbook reaches the agent (real in-context SOP loading, not post-hoc string edits)."""
@@ -49,6 +90,10 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
     profile = db.get(AgentProfile, actor.agent_profile_id) if actor.agent_profile_id else None
     if profile is None:
         return _finish(db, run, "failed", error="actor has no agent profile")
+
+    blocked = governance.run_block_reason(db, run.org_id, actor.department_id)
+    if blocked:  # kill switch / paused department / budget cap — checked BEFORE any model spend
+        return _finish(db, run, "failed", error=f"blocked: {blocked}")
 
     try:
         provider = build_provider(profile.provider, profile.model, resolve_api_key(db, run.org_id, profile.provider))
@@ -63,7 +108,9 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
     tool_specs = [
         {"name": r.name, "description": r.description, "input_schema": r.input_schema}
         for r in tools.granted_tools(db, run.org_id, grants)
-        if r.name != "echo" or profile.provider == "echo"
+        if (r.name != "echo" or profile.provider == "echo")
+        # a tool that can only ever error just teaches the model to waste a turn on it
+        and (r.name != "web_search" or settings.serper_api_key)
     ]
 
     run.status = "running"
@@ -81,17 +128,29 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
         db.refresh(run)
         if run.kill_requested:
             return _finish(db, run, "killed", error="kill requested")
+        if turn > 0:  # the kill switch / budget can flip mid-run — don't keep spending through it
+            blocked = governance.run_block_reason(db, run.org_id, actor.department_id)
+            if blocked:
+                return _finish(db, run, "failed", error=f"blocked: {blocked}")
+
+        # last allowed turn: take the tools away and ask for the answer, so a model that keeps
+        # reaching for tools ends with a deliverable instead of "max_turns exhausted" and no output.
+        # Not for Echo — its deterministic two-turn dance must stay exactly as tested.
+        last_turn = turn == profile.max_turns - 1 and profile.provider != "echo"
+        if last_turn and any(m["role"] == "tool" for m in messages):
+            messages.append({"role": "user", "content":
+                             "Tool use is finished. Write your final deliverable now, using what you have."})
 
         try:
             t0 = time.monotonic()
-            comp: Completion = provider.complete(
-                system=system, messages=messages,
-                tools=tool_specs, max_tokens=profile.max_tokens,
+            comp: Completion = complete_with_retry(
+                provider, system=system, messages=messages,
+                tools=[] if last_turn else tool_specs, max_tokens=profile.max_tokens,
             )
             latency_ms = int((time.monotonic() - t0) * 1000)
-            step_cost = cost.compute(profile.model, comp.input_tokens, comp.output_tokens)
+            step_cost = cost.compute_or_default(profile.model, comp.input_tokens, comp.output_tokens)
         except Exception as e:  # provider or cost failure -> stop
-            return _finish(db, run, "failed", error=f"model call: {e}")
+            return _finish(db, run, "failed", error=f"model call: {explain_error(e)}")
 
         run.turns_used = turn + 1
         run.cost_usd = round(run.cost_usd + step_cost, 6)
@@ -106,6 +165,9 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
             return _finish(db, run, "failed", error=f"cost_ceiling exceeded (${run.cost_usd})")
 
         if comp.stop_reason != "tool_use":
+            if not (comp.text or "").strip():
+                # an empty reply is not a deliverable — and would crash the NOT NULL artifact write
+                return _finish(db, run, "failed", error="model returned an empty response")
             return _finish(db, run, "succeeded", result={"text": comp.text})
 
         # execute tool calls, feed results back. tool_calls carries the raw ToolCalls (id/name/args)
@@ -116,20 +178,26 @@ def execute(db: Session, run: AgentRun, extra_system: str = "") -> AgentRun:
             "tool_calls": comp.tool_calls,
         })
         for tc in comp.tool_calls:
+            failed = False
             try:
                 result = tools.execute(db, run.org_id, grants, tc.name, tc.args)
-            except Exception as e:  # ungranted / unknown tool -> stop
-                return _finish(db, run, "failed", error=f"tool {tc.name}: {e}")
+            except Exception as e:
+                # a tool failing (no API key, bad args, ungranted) is information for the model, not
+                # a reason to kill the whole run: hand the error back so it can carry on without the
+                # tool. Failing the run here turned "web search unavailable" into a lost task.
+                failed, result = True, {"error": f"{type(e).__name__}: {e}"}
             events.append(
                 db, org_id=run.org_id, trace_id=run.trace_id, run_id=run.id, actor_id=run.actor_id,
-                action="tool.call", target=tc.name, before={"args": tc.args}, after={"result": result},
+                action="tool.call", target=tc.name, before={"args": tc.args},
+                after={"result": result, "failed": failed},
             )
             # json.dumps, not str(): a Python dict repr ({'a': 'b'}) isn't valid JSON and reads as
             # ambiguous noise to a model, especially a weaker local one — this labels it clearly and
             # gives back parseable data instead of a data structure impersonating a user message.
             # tool_call_id lets Anthropic match this result back to the tool_use block that asked for it.
+            label = f"Tool '{tc.name}' FAILED (continue without it): " if failed else f"Tool '{tc.name}' result: "
             messages.append({
-                "role": "tool", "content": f"Tool '{tc.name}' result: {json.dumps(result)}",
+                "role": "tool", "content": f"{label}{json.dumps(result)}",
                 "tool_call_id": tc.id,
             })
 

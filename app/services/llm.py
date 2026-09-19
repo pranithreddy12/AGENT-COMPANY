@@ -621,3 +621,56 @@ def build_provider(provider: str, model: str, api_key: str | None):
             )
         return AnthropicProvider(api_key=key, model=model)
     raise RuntimeError(f"unknown provider {provider!r}")
+
+
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _is_transient(e: Exception) -> bool:
+    """A failure worth retrying: rate limit / server error / couldn't connect. NOT a read timeout —
+    on a slow local model that means "still thinking", and retrying would just double the wait."""
+    import httpx
+
+    if isinstance(e, httpx.HTTPStatusError):
+        return e.response.status_code in _RETRY_STATUS
+    if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError)):
+        return True
+    return getattr(e, "status_code", None) in _RETRY_STATUS  # anthropic SDK errors carry status_code
+
+
+def complete_with_retry(provider, *, attempts: int = 3, base_delay: float = 2.0, **kwargs) -> Completion:
+    """provider.complete() with a bounded retry on transient failures. Cloud providers 429/503
+    routinely under load; without this one blip failed a whole task (and its Critic/revise cycle)
+    and sent it to a human for something that a retry two seconds later would have fixed."""
+    import time
+
+    for i in range(attempts):
+        try:
+            return provider.complete(**kwargs)
+        except Exception as e:
+            if i == attempts - 1 or not _is_transient(e):
+                raise
+            time.sleep(min(base_delay * (2**i), 20))
+
+
+def explain_error(e: Exception) -> str:
+    """A model-call failure in words a user can act on. Raw exception text was useless in the UI:
+    "HTTPStatusError" alone (type name only), or a bare model name, told nobody what to fix."""
+    import httpx
+
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        hint = {
+            400: "the request was rejected — check the model name",
+            401: "the API key was rejected — check it in Governance -> Model",
+            403: "access denied — check the API key's permissions",
+            404: "not found — check the model name and provider URL",
+            429: "rate limited — try again in a moment",
+        }.get(code, "the provider had a server error" if code >= 500 else "unexpected response")
+        return f"the model API returned {code} ({hint})"
+    if isinstance(e, httpx.TimeoutException):
+        return "the model took too long to respond"
+    if isinstance(e, httpx.ConnectError):
+        return "couldn't reach the model server (is Ollama running / is the URL right?)"
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg}"[:300] if msg else type(e).__name__

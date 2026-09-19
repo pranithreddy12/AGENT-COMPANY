@@ -56,16 +56,16 @@ def agent_memory_context(db: Session, org_id: str, actor: Actor) -> str:
     if prof is None or prof.provider == "echo":
         return raw[-_RAW_CAP:]  # Echo can't summarize — keep the most recent slice instead of nothing
 
-    from app.services import llm
+    from app.services import llm, runs
     try:
-        provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, org_id, prof.provider))
+        provider = runs.metered(db, org_id, actor, prof, "memory summary")
         system = (
             "Summarize this agent's own work history into a short digest (5-8 bullet points): what "
             "it has done, decisions it made, anything it should remember going forward. Keep concrete "
             "specifics (names, numbers, decisions) - drop routine detail."
         )
-        comp = provider.complete(system=system, messages=[{"role": "user", "content": raw}],
-                                 tools=[], max_tokens=_SUMMARY_MAX_TOKENS)
+        comp = llm.complete_with_retry(provider, system=system, messages=[{"role": "user", "content": raw}],
+                                       tools=[], max_tokens=_SUMMARY_MAX_TOKENS)
         summary = (comp.text or "").strip()
         return summary or raw[-_RAW_CAP:]
     except Exception:

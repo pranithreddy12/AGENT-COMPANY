@@ -26,6 +26,7 @@ from app.services import (
     cost,
     communication,
     events,
+    governance,
     intelligence,
     playbooks,
     research,
@@ -84,6 +85,9 @@ def _eligible_pool(db: Session, org_id: str, pool: list[Actor]) -> list[Actor]:
 def draft_project(
     db: Session, org_id: str, goal: str, account_id: str | None = None
 ) -> tuple[Project, list[Task]]:
+    blocked = governance.run_block_reason(db, org_id)
+    if blocked:  # planning spends a model call too — the kill switch / budget cap must stop it
+        raise PlanError(f"can't plan right now: {blocked}")
     project = Project(
         org_id=org_id,
         goal=goal,
@@ -128,7 +132,7 @@ def draft_project(
         runs._finish(db, run, "failed", error=f"plan: {e}")
         raise PlanError(str(e))
 
-    step_cost = cost.compute(profile.model, pr.input_tokens, pr.output_tokens)
+    step_cost = cost.compute_or_default(profile.model, pr.input_tokens, pr.output_tokens)
     run.cost_usd = step_cost
     events.append(
         db,
@@ -246,9 +250,8 @@ def _review(
         else None
     )
     if prof and prof.provider != "echo":
-        provider = build_provider(
-            prof.provider, prof.model, resolve_api_key(db, org_id, prof.provider)
-        )
+        # metered: the Critic runs up to 3x per task and was invisible to the org's spend + kill switch
+        provider = runs.metered(db, org_id, critic, prof, "QA review")
         return review.llm_critic_review(provider, content, criteria, playbook)
     return review.critic_review(content, criteria, playbook)
 
@@ -367,6 +370,11 @@ def _run_and_review(
             art.needs_human, art.critic_reasons = True, [f"critic error: {e}"]
             return art
         art.reviewed_by_actor_id = critic.id if critic else None
+        if verdict.error:
+            # the JUDGE broke, not the work: re-running the producer would burn model calls "fixing" a
+            # draft nobody critiqued. Keep the draft, flag it for a human, stop here.
+            art.needs_human, art.critic_reasons = True, list(verdict.reasons)
+            return art
         if verdict.passed:
             art.status, art.critic_reasons = "reviewed", []
             return art

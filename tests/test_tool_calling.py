@@ -210,6 +210,7 @@ def test_a_real_provider_never_sees_the_echo_tool(db, monkeypatch):
             return Completion(text="done", tool_calls=[], input_tokens=1, output_tokens=1)
 
     monkeypatch.setattr(runs, "build_provider", lambda *a, **k: _FakeProvider())
+    monkeypatch.setattr(runs.settings, "serper_api_key", "test-key")  # web_search only offered when usable
     runs.execute(db, runs.create_run(db, org_id, sam, "do the thing"))
 
     assert "echo" not in seen_tools["names"]

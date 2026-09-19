@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Actor, AgentProfile, MemoryRecord, Project
-from app.services import llm
+from app.services import llm, runs
 
 _RESEARCH_SYSTEM = (
     "You are the Research agent at an agency. Turn the web search results into a concise, factual "
@@ -56,9 +56,9 @@ def run_research(db: Session, project: Project) -> str | None:
             return None
         sources = "\n".join(f"- {r['title']}: {r['snippet']} ({r['link']})" for r in results)
         prof = db.get(AgentProfile, agent.agent_profile_id)
-        provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, project.org_id, prof.provider))
-        comp = provider.complete(
-            system=_RESEARCH_SYSTEM,
+        provider = runs.metered(db, project.org_id, agent, prof, "web research")
+        comp = llm.complete_with_retry(
+            provider, system=_RESEARCH_SYSTEM,
             messages=[{"role": "user", "content": f"Goal: {project.goal}\n\nWeb results:\n{sources}\n\nWrite the brief."}],
             tools=[], max_tokens=1024,  # a concise brief; the whole team re-reads it, so keep it tight
         )

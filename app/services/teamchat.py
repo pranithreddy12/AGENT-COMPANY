@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import Actor, AgentProfile, Artifact, Department, Message, Project, Task, Thread
-from app.services import agent_memory, communication, llm, planning
+from app.services import agent_memory, communication, governance, llm, planning, runs
 
 TEAM_THREAD_TYPE = "team"
 _CHAT_PROJECT_GOAL = "Team chat requests"
@@ -95,7 +95,7 @@ def classify_intent(db: Session, org_id: str, agent: Actor, text: str, transcrip
     if prof is None or prof.provider == "echo":
         return "task"
     try:
-        provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, org_id, prof.provider))
+        provider = runs.metered(db, org_id, agent, prof, "chat classification")
         system = (
             "Classify the human's latest message in this team chat as exactly one word.\n"
             "TASK: a new goal, deliverable, or piece of work to actually produce, execute, or plan.\n"
@@ -104,22 +104,53 @@ def classify_intent(db: Session, org_id: str, agent: Actor, text: str, transcrip
             "Reply with exactly one word: TASK or CHAT."
         )
         user = f"Recent conversation:\n{transcript}\n\nClassify this latest message: {text}"
-        comp = provider.complete(system=system, messages=[{"role": "user", "content": user}], tools=[], max_tokens=5)
+        comp = llm.complete_with_retry(provider, system=system, messages=[{"role": "user", "content": user}],
+                                       tools=[], max_tokens=8)
         verdict = (comp.text or "").strip().upper()
         return "chat" if "CHAT" in verdict and "TASK" not in verdict else "task"
     except Exception:
         return "chat"
 
 
+def _route_mention(db: Session, org_id: str, agent: Actor, goal: str, project: Project,
+                   transcript: str) -> dict:
+    """Decide what one @mention means and set it up: classify it (a model call for a real provider),
+    then either a conversational reply, the Lead drafting a real project, or a real Task for anyone
+    else. Returns the dict the dispatcher acts on. Shared by the synchronous post() and the background
+    worker so both make the exact same call."""
+    base = {"actor_id": agent.id, "goal": goal, "agent": agent.name, "handle": handle(agent)}
+    if classify_intent(db, org_id, agent, goal, transcript) == "chat":
+        return {"kind": "chat", **base}
+    if agent.role == "lead":
+        return {"kind": "lead", **base}
+    t = Task(
+        org_id=org_id,
+        project_id=project.id,
+        goal=goal,
+        department_id=agent.department_id,
+        assignee_actor_id=agent.id,
+        status="in_progress",
+        est_effort_hours=1.0,
+    )
+    db.add(t)
+    db.flush()
+    return {"kind": "task", "task_id": t.id, "agent": agent.name, "handle": handle(agent)}
+
+
 def post(
-    db: Session, org_id: str, text: str, sender_actor_id: str | None = None
+    db: Session, org_id: str, text: str, sender_actor_id: str | None = None, defer: bool = False
 ) -> dict:
     """Post a human message to the team chat. Each @mentioned agent's message is classified first
-    (classify_intent): a real task/goal gets real work assigned — the Lead gets a real drafted
+    (classify_intent): a real task/goal gets real work assigned - the Lead gets a real drafted
     project (planning.draft_project, the same thing the Dashboard's "Plan it" directive calls), any
     other agent gets a real Task run through Critic + Legal. A conversational message (question,
-    status check, clarification) gets a plain in-character reply instead — no Task, no Critic, no
-    Legal, no wasted plan attempt. Returns the message + what to run in the background per mention."""
+    status check, clarification) gets a plain in-character reply instead - no Task, no Critic, no
+    Legal, no wasted plan attempt. Returns the message + what to run in the background per mention.
+
+    defer=True (what the HTTP endpoint uses): record the message and return at once with each mention
+    as kind "pending". Classification is a model call - minutes on a local model - and doing it inside
+    the request meant the human's own message didn't even appear until it finished. The background
+    worker (run_chat_mention_in_background) classifies and dispatches instead."""
     text = (text or "").strip()
     if not text:
         return {"error": "empty_message"}
@@ -129,56 +160,41 @@ def post(
     if not mentioned:
         return {"message_id": msg.id, "tasks": []}  # plain chatter, no work assigned
 
-    project = _chat_project(db, org_id)
     goal = (
         _MENTION_RE.sub("", text).strip() or text
     )  # the instruction minus the @handles
+    if defer:
+        return {"message_id": msg.id, "tasks": [
+            {"kind": "pending", "actor_id": a.id, "goal": goal, "agent": a.name, "handle": handle(a)}
+            for a in mentioned
+        ]}
+    project = _chat_project(db, org_id)
     transcript = recent_transcript(db, org_id)
-    tasks = []
-    for agent in mentioned:
-        intent = classify_intent(db, org_id, agent, goal, transcript)
-        if intent == "chat":
-            tasks.append(
-                {
-                    "kind": "chat",
-                    "actor_id": agent.id,
-                    "goal": goal,
-                    "agent": agent.name,
-                    "handle": handle(agent),
-                }
-            )
-            continue
-        if agent.role == "lead":
-            tasks.append(
-                {
-                    "kind": "lead",
-                    "actor_id": agent.id,
-                    "goal": goal,
-                    "agent": agent.name,
-                    "handle": handle(agent),
-                }
-            )
-            continue
-        t = Task(
-            org_id=org_id,
-            project_id=project.id,
-            goal=goal,
-            department_id=agent.department_id,
-            assignee_actor_id=agent.id,
-            status="in_progress",
-            est_effort_hours=1.0,
-        )
-        db.add(t)
-        db.flush()
-        tasks.append(
-            {
-                "kind": "task",
-                "task_id": t.id,
-                "agent": agent.name,
-                "handle": handle(agent),
-            }
-        )
+    tasks = [_route_mention(db, org_id, a, goal, project, transcript) for a in mentioned]
     return {"message_id": msg.id, "tasks": tasks}
+
+
+def run_chat_mention_in_background(org_id: str, actor_id: str, goal: str) -> None:
+    """Classify one deferred @mention, then do whatever it turns out to mean. The slow model call that
+    used to block the HTTP request lives here, on a worker thread."""
+    db = SessionLocal()
+    try:
+        agent = db.get(Actor, actor_id)
+        if agent is None:
+            return
+        routed = _route_mention(db, org_id, agent, goal, _chat_project(db, org_id), recent_transcript(db, org_id))
+        db.commit()  # persist a newly created Task before the runner (its own session) loads it
+    except Exception:
+        db.rollback()
+        return
+    finally:
+        db.close()
+    if routed["kind"] == "chat":
+        run_chat_reply_in_background(org_id, actor_id, goal)
+    elif routed["kind"] == "lead":
+        run_chat_lead_in_background(org_id, actor_id, goal)
+    else:
+        run_chat_task_in_background(routed["task_id"])
 
 
 def run_chat_lead_in_background(org_id: str, lead_actor_id: str, goal: str) -> None:
@@ -199,7 +215,7 @@ def run_chat_lead_in_background(org_id: str, lead_actor_id: str, goal: str) -> N
                 db,
                 org_id,
                 agent,
-                f"I couldn't draft a plan for that: {type(e).__name__}.",
+                f"I couldn't draft a plan for that: {e or type(e).__name__}.",
             )
             db.commit()
             return
@@ -254,7 +270,7 @@ def run_chat_reply_in_background(org_id: str, actor_id: str, text: str) -> None:
         )
         own_memory = agent_memory.agent_memory_context(db, org_id, agent)
         try:
-            provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, org_id, prof.provider))
+            provider = runs.metered(db, org_id, agent, prof, "chat reply")
             system = (
                 f"{persona}\n\nYou're replying in a team chat, not producing a deliverable. Reply "
                 "directly and briefly, in first person, grounded in the real conversation and your "
@@ -264,11 +280,14 @@ def run_chat_reply_in_background(org_id: str, actor_id: str, text: str) -> None:
                 (f"Your own memory from past work:\n{own_memory}\n\n" if own_memory else "")
                 + f"Recent conversation:\n{transcript}\n\nRespond to the latest message."
             )
-            comp = provider.complete(system=system, messages=[{"role": "user", "content": user}],
-                                     tools=[], max_tokens=400)
+            comp = llm.complete_with_retry(provider, system=system,
+                                           messages=[{"role": "user", "content": user}],
+                                           tools=[], max_tokens=600)
             reply = (comp.text or "").strip() or "(no response)"
+        except governance.Blocked as e:
+            reply = f"I can't do that right now: {e}."
         except Exception as e:
-            reply = f"I couldn't answer that: {type(e).__name__}."
+            reply = f"I couldn't answer that: {llm.explain_error(e)}."
         _reply(db, org_id, agent, reply)
         agent_memory.remember_agent(db, org_id, actor_id, f"Answered in chat: {text[:120]} -> {reply[:180]}")
         db.commit()
@@ -343,7 +362,7 @@ def run_chat_task_in_background(task_id: str) -> None:
                 db,
                 task.org_id,
                 agent,
-                f"I couldn't finish that: {type(e).__name__}. "
+                f"I couldn't finish that: {llm.explain_error(e)}. "
                 f"The task is marked blocked for a human to look at.",
             )
             db.commit()
@@ -365,6 +384,10 @@ def _summary(art: Artifact, request: str | None = None) -> str:
     this only needs to protect against a truly runaway artifact — not clip normal deliverables."""
     if art.blocked:
         return f"Legal blocked this: {art.block_reason}. Nothing sent — a human needs to clear it."
+    if any(str(r).startswith("run failed") for r in (getattr(art, "critic_reasons", None) or [])):
+        # a failed run's "content" is its error text - presenting that under "Done." was a lie
+        return (f"I couldn't finish that — {art.content}. The task is blocked for a human to look at "
+                "(fix the cause, then re-run it).")
     opener = ""
     if request:
         req = " ".join(request.split())[:120]

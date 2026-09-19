@@ -40,18 +40,11 @@ def post_chat(body: ChatPost, db: Session = Depends(get_db),
     message (question, status check, clarification) gets a plain in-character reply instead — no
     task machinery wasted on a message that was never asking for a deliverable. Returns as soon as
     work is queued so the UI never blocks on a model call."""
-    result = teamchat.post(db, p.org_id, body.message, sender_actor_id=None)
+    result = teamchat.post(db, p.org_id, body.message, sender_actor_id=None, defer=True)
     if result.get("error") == "empty_message":
         raise HTTPException(status_code=400, detail="message is empty")
-    db.commit()  # persist message + queued work before the workers (own sessions) pick them up
-    for t in result["tasks"]:
-        if t["kind"] == "lead":
-            threading.Thread(target=teamchat.run_chat_lead_in_background,
-                             args=(p.org_id, t["actor_id"], t["goal"]), daemon=True).start()
-        elif t["kind"] == "chat":
-            threading.Thread(target=teamchat.run_chat_reply_in_background,
-                             args=(p.org_id, t["actor_id"], t["goal"]), daemon=True).start()
-        else:
-            threading.Thread(target=teamchat.run_chat_task_in_background,
-                             args=(t["task_id"],), daemon=True).start()
+    db.commit()  # persist the message before the workers (own sessions) pick anything up
+    for t in result["tasks"]:  # every mention is classified + dispatched off the request thread
+        threading.Thread(target=teamchat.run_chat_mention_in_background,
+                         args=(p.org_id, t["actor_id"], t["goal"]), daemon=True).start()
     return result

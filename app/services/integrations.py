@@ -19,7 +19,7 @@ from app.db import SessionLocal
 from app.models import (
     Account, Actor, AgentProfile, Artifact, Contact, Department, Lead, Project, ProposalAcceptance, Task,
 )
-from app.services import llm, planning, research, review
+from app.services import llm, planning, research, review, runs
 
 _PROPOSAL_SYSTEM = (
     "You are a senior consultant at an automation agency, writing a proposal that will be sent to the "
@@ -232,7 +232,10 @@ def _produce_proposal_artifact(db: Session, project: Project, hf) -> tuple[Artif
     sales = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.department_id == dept.id,
                                            Actor.type == "agent", Actor.role == "member")).first() if dept else None
     prof = db.get(AgentProfile, sales.agent_profile_id) if sales else None
-    provider = llm.build_provider(prof.provider, prof.model, llm.resolve_api_key(db, org_id, prof.provider)) if prof else None
+    try:
+        provider = runs.metered(db, org_id, sales, prof, "client proposal") if prof else None
+    except Exception:  # provider init failure (e.g. missing key) -> proposal fails cleanly below
+        provider = None
     if provider is None:
         _fail_proposal(project)
         return None, False
@@ -244,8 +247,8 @@ def _produce_proposal_artifact(db: Session, project: Project, hf) -> tuple[Artif
             + (f"\nWeb research on the prospect:\n{research_ctx}\n" if research_ctx else "")
             + "\nWrite the full client-ready proposal now.")
     try:
-        comp = provider.complete(system=_PROPOSAL_SYSTEM, messages=[{"role": "user", "content": user}],
-                                 tools=[], max_tokens=3000)
+        comp = llm.complete_with_retry(provider, system=_PROPOSAL_SYSTEM,
+                                       messages=[{"role": "user", "content": user}], tools=[], max_tokens=3000)
     except Exception:
         _fail_proposal(project)
         return None, False

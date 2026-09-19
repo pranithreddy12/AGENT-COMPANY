@@ -22,6 +22,18 @@ def recover_stuck(db) -> None:
         pr.status = "active"
     for pr in db.scalars(select(Project).where(Project.status == "generating")):
         pr.status, pr.leadforge_lead_id = "failed", None
+    # a chat-assigned task is "in_progress" only while its worker thread is alive (project tasks go
+    # scheduled -> done/blocked and never sit in_progress), so at startup any such row is an orphan of
+    # the restart. Left alone it spins forever in the UI; block it and tell the human in the chat.
+    from app.models import Actor, Task
+    from app.services import teamchat
+
+    for t in list(db.scalars(select(Task).where(Task.status == "in_progress"))):
+        t.status = "blocked"
+        agent = db.get(Actor, t.assignee_actor_id) if t.assignee_actor_id else None
+        teamchat._reply(db, t.org_id, agent,
+                        f"The server restarted while I was working on “{' '.join(t.goal.split())[:80]}”, "
+                        "so that work was lost. Ask me again and I will redo it.")
     db.commit()
 
 
