@@ -195,7 +195,7 @@ Roster handles are agent first names: `@cora @piper @sam @mia @devin @dana @lena
 3. **Legal is a coarse keyword screen**, not a real compliance review — documented honestly in the code, but worth remembering before trusting it on anything sensitive (e.g. a proposal whose content implies ToS-violating methods).
 
 **Ops:**
-4. `startup.bat` hardcodes port 8000, permanently occupied on this machine → fails to bind. Should auto-pick a free port. Still unfixed.
+4. ~~`startup.bat` hardcodes port 8000~~ — fixed: it picks a free port (`scripts/pick_free_port.py`), uses `venv/` if present and pins `py -3.11`.
 5. Multiple demo orgs accumulate in `company_os.db` (each `POST /orgs` seeds a full roster). Harmless, but noisy.
 6. `SERPER_API_KEY` not set — see §4.
 
@@ -265,3 +265,49 @@ Ordered by distance from revenue.
 | `scripts/run_one_deal.py` | live end-to-end proposal rehearsal |
 | `tests/test_console_endpoints_smoke.py` | HTTP-level smoke test over every console GET endpoint — add new console-facing endpoints here |
 | `docs/STATUS.md` | **stale, superseded by this file** — do not trust it |
+
+---
+
+## 12. Deep audit — 2026-09-19 (what was found, fixed, and still open)
+
+Method: read every service/router, traced the real mechanisms, then verified fixes against the running
+server (a fake Ollama-compatible HTTP server logs every prompt; useful when the real Ollama is down).
+Suite: 208 tests. Fixes are in commits `d73c007`, `b26d6e5` (and `b0f7bff` before them).
+
+**Fixed - reliability of agent runs** (`services/runs.py`, `llm.py`)
+- A failing tool (e.g. `web_search` with no `SERPER_API_KEY`) used to fail the whole run. The error now goes back to the model as a tool result; `web_search` is not even offered without a key.
+- Last allowed turn removes tools and asks for the deliverable (no more "max_turns exhausted" with no output). Empty model replies fail cleanly (they used to crash the NOT NULL artifact write).
+- Transient provider errors (429/5xx/connect) retry with backoff (`llm.complete_with_retry`); read timeouts deliberately do not (slow local model = "still thinking").
+- Unlisted models are priced at a conservative default (`cost.compute_or_default`) instead of failing the run *after* the paid call. `cost.compute` itself still fails closed.
+- Errors are explained for humans (`llm.explain_error`): 401 -> check key, 404 -> check model name, ConnectError -> is Ollama running.
+
+**Fixed - governance was cosmetic for agents**
+- Kill switch, department pause and the org budget cap only guarded *outbound sends* (`governance.evaluate`). `governance.run_block_reason` now stops agent work: before a run, between turns, before every side-channel call, and mid-`execute_project`.
+- `runs.MeteredProvider` / `runs.metered()` costs and records (as `AgentRun` rows) every model call made outside `runs.execute` - Critic, chat replies, intent classification, memory summaries, research, proposals. Before, "Spent $X of cap" ignored all of them. **Any new direct `provider.complete()` call should go through `runs.metered` + `llm.complete_with_retry`.**
+
+**Fixed - why so much work ended "needs human review"**
+- Agents were told never to write `[Company Name]` but were never told the company. `Organization.profile` + `services/company.py` + Governance -> Company profile panel; injected into every brief, chat reply and Lead planning prompt. **Fill this in - it is the single biggest quality lever.**
+- A broken Critic reply (unparseable JSON) retries once, then escalates *without* re-running the producer (it used to trigger 2 pointless revisions of un-critiqued work).
+- A failed upstream task's error text used to be handed to downstream agents as "your teammate's deliverable"; it is now named as a failure.
+
+**Fixed - execution semantics**
+- "Run" resumes: finished tasks keep their artifact and are not re-executed/re-billed. One artifact per task (re-runs bump `version`); `rerun_task` no longer picks an arbitrary/stale artifact as context.
+- Chat-assigned work now gets the Legal keyword screen. Plan effort estimates clamped; plans > 30 tasks rejected (model re-plans).
+- Assignment routes around a demonstrably struggling agent (`planning._eligible_pool`, uses the existing scorecard).
+- `POST /teamchat` returns in ~20ms (classification moved to `teamchat.run_chat_mention_in_background`; it blocked the request for 60-110s on a local model). Tasks orphaned by a restart are blocked with a chat message (`main.recover_stuck`).
+
+**Fixed - security**
+- `client`-role users (portal logins for external customers) were accepted by every `current_principal` endpoint: they could read all internal projects/artifacts, run agents and execute projects. `current_principal` is now staff-only (`auth.any_principal` is the un-restricted one, used by `require_role("client")`).
+- Startup warns when the built-in dev `JWT_SECRET` is in use.
+
+**Still open (ranked)**
+1. **Independent tasks run sequentially** (`execute_project`). A 10-task project = 10x model latency. Run each DAG level in parallel (own session per task; SQLite write lock is the constraint - see Postgres item).
+2. **Downstream tasks of a failed task still run** (now with an explicit "upstream failed" note). Blocking them would save spend; needs a resume UX first.
+3. `POST /runs` and `POST /tasks/{id}/rerun` are synchronous request-thread model calls (minutes on a local model). Should be background + poll like `/execute`.
+4. **API keys are plaintext in `company_os.db`** (`Organization.llm_api_keys`) - fine for a single-operator local tool, not for anything shared. `.env` fallback exists.
+5. Background work = daemon threads; a restart loses in-flight chat replies/plans (tasks are recovered, replies are not). A DB-backed job table + one worker fixes both this and item 1's locking.
+6. No login rate limit; `POST /orgs` is open (fine on localhost).
+7. Legal is a 3-phrase keyword screen (unchanged, documented). Critic quality is only as good as the configured model; weak local models judge unreliably.
+8. OpenRouter models are still registered at $0 (`cost.register_free`), so the budget cap under-protects that provider (see §9).
+
+**Machine notes:** Ollama was not running on 2026-09-19; the app now says so plainly ("couldn't reach the model server"). `company_os.db` is auto-migrated on start (`organizations.profile`).
