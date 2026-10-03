@@ -31,6 +31,45 @@ The framing "AI-staffed company" is still mostly the demo. **The proposal loop i
 
 ---
 
+## 1b. Direction — the redesigned plan (2026-10-03)
+
+**Decision: stop being "an AI company" and become a delivery desk for a small services business.**
+One workflow, done end to end, measured: **lead -> proposal -> human approval -> client signs -> delivery
+project with real deliverables -> client portal -> invoice.** The seven-department roster is the *staff of
+that workflow*, not the product. (Assumed first user: a solo/small agency owner - the LeadForge/Dubai
+med-spa context. Challenge this if wrong; everything below follows from it.)
+
+**Why this and not the alternatives**
+- *"AI company simulation"* (the original framing) is the least differentiated thing here: multi-agent
+  manager+specialists is a commodity pattern, and it is exactly what the audit found to be mostly theatre.
+- *"OrgOS" (allocation/restructuring research)* is interesting but is a research project, not something a
+  user finds useful. Its one cheap, real piece already shipped (scorecard-aware assignment). Park the rest.
+- The proposal path is the only part that touches money, and the audit made it measurable: every model
+  call is now costed (`runs.metered`), so *cost per deal* is a real number for the first time.
+
+**What users should be able to say after this plan**
+"I describe my business once, paste a lead, and get a proposal I'd actually send - in minutes, for cents -
+and when the client signs I get a delivery plan with drafts I mostly just approve."
+
+**Principles for the redesign**
+1. *Ground before generate.* No output without the company profile, price list and tone. (Largest lever found.)
+2. *Code validates, models draft.* Placeholders, invented prices and bad dates are deterministic checks.
+3. *Measure or it did not happen.* Each phase has an exit metric; no phase starts until the last one's holds.
+4. *Cloud model by default, local optional.* A 14B local model measured ~70s per call here; fine for tests,
+   unusable as the first-run experience.
+5. *Freeze, don't delete.* Voice, CRM, retro, hire-an-agent stay but get no new work until a real deal needs them.
+
+**The five numbers we track** (per org, on the console's standup view)
+| Metric | Source | Why |
+|---|---|---|
+| Deals signed / proposals approved | `ProposalAcceptance`, `Project.status` | the only outcome that matters |
+| First-pass rate | `intelligence.scorecard` | does work pass QA without revision |
+| Human edit rate | `Annotation` + artifact versions after approval | how much a human still rewrites |
+| Cost per deal | sum `AgentRun.cost_usd` by project | the metering fix makes this real |
+| Time to first useful output | run start -> artifact approved | the "feels useful" number |
+
+---
+
 ## 2. How to run it
 
 ```bash
@@ -201,30 +240,67 @@ Roster handles are agent first names: `@cora @piper @sam @mia @devin @dana @lena
 
 ---
 
-## 8. The plan — prioritized
+## 8. The plan - redesigned 2026-10-03
 
-Ordered by distance from revenue.
+*(Supersedes the previous prioritized list. Old items are folded in below; see git history for the original.)*
 
-### Now (small, high leverage)
-1. **Add `SERPER_API_KEY` to `.env`** (2 min, get one at serper.dev). Unlocks real web search results — the plumbing is done, this is the only missing piece.
-2. **Output validator** (~30 min, code not agent). Reject unapproved numbers and `[...]` placeholders post-generation on proposals. Kills defects 1-2 in §7.
-3. **Fix `startup.bat` port** (~10 min).
+Each phase has an **exit gate**. Do not start the next phase until the gate holds. Targets are proposals -
+adjust after the first real data.
 
-### Next (closes the revenue loop)
-4. **Email send** (Resend/Postmark, ~1h, `side_effect: irreversible` + approval gate). Today Company OS drafts and LeadForge sends; this closes the loop in one system.
-5. **Stripe invoice on accept** (~1-2h). The accept flow currently ends at `accepted` and then nothing. An invoice on signature is the difference between a signature and money.
-6. **Calendar** (Cal.com, ~1h). The real next step after a proposal is a booked call.
-7. **Onboarding flow** — after accept, collect credentials/access, run a kickoff checklist. Currently manual on every deal.
+### Phase A - One real deal, trustworthy (target: ~2 weeks)
+Goal: a proposal you would send without rewriting it.
+1. **First-run onboarding** (replaces the empty Company-profile box): a short wizard - what you sell, to whom,
+   price list / packages, tone, a good past proposal to imitate. Stored on `Organization.profile` (+ a
+   structured `price_list`). Nothing runs until the org name + offer are set.
+2. **Deterministic output validator** on proposals and every artifact: reject `[...]` placeholders, numbers
+   not in the price list, dates in the past, forbidden claims. A failure feeds the producer a *specific*
+   fix, not a vague revise. (Kills the long-standing defects in section 7.)
+3. **Cloud model default**: first-run asks for a Mistral/Anthropic key and picks a sane default model;
+   Ollama stays selectable. Show model, spend and "Ollama not reachable" in the header.
+4. **Send + close the loop**: email send (Resend/Postmark, irreversible side effect, approval-gated), Stripe
+   invoice on accept, Cal.com link in the proposal.
+5. **Run the real deal** (`scripts/run_one_deal.py` exists) and record the five metrics.
 
-### Later (the bigger bets)
-8. **Code execution sandbox** (E2B / Modal / Vercel Sandbox). Makes Dev agents real — they ship code instead of describing it. Longest payback; this is the "autonomous company" bet, not the revenue bet.
-9. **Verifier / Fact-Checker agent** — reviews drafts against sources before the Critic, now genuinely possible with real web_search.
-10. **Compliance agent** — reads ToS/regulatory context per deal; the judgment a keyword list can't make.
-11. **Postgres + Alembic** — required before multi-user. Schema changes currently go through `db._migrate_sqlite`.
-12. **More tools beyond web_search** — the pattern is proven and cheap now (dict entry + grant): calendar read/write, CRM lookups, file/doc generation.
+**Exit gate:** 1 real proposal sent and signed; proposal needs <=2 human edits; cost per deal < $1; time to
+first useful output < 3 min on the cloud model.
+
+### Phase B - Delivery that mostly just works (~3 weeks)
+Goal: after signature, the delivery project's drafts are approve-and-send, not rewrite.
+1. **Parallel execution** of independent DAG levels (own session per task; one writer lock on SQLite).
+2. **Failure semantics**: a failed task blocks its dependents (saves spend) with a one-click "retry from here"
+   in the UI; `POST /runs` and `/tasks/{id}/rerun` become background + poll.
+3. **Golden-task eval set** (10-20 real tasks from Phase A with a human-approved answer) wired into
+   `services/evals.py` and CI; track first-pass rate per model so model/prompt changes are measured, not felt.
+4. **Edit capture**: store the human's final edit of each artifact; feed recurring edits back as Playbook
+   `RULE:`s (the amend/activate path already exists).
+5. **Client portal v2**: deliverable approval + comments by the client, status timeline.
+
+**Exit gate:** first-pass rate >= 70% on the golden set; a 6-task project completes in < 10 min on the cloud
+model; <= 25% of artifacts edited by a human before sending.
+
+### Phase C - Agents that do, not describe (~4+ weeks, one tool at a time)
+Pick the next tool **from what real deals needed**, in this order of expected payoff: document generation
+(PDF/DOCX proposals and SOWs) -> calendar read/write -> CRM lookups -> code-execution sandbox (E2B/Modal)
+for the Dev agents. Each tool = registry entry + grant + approval policy + eval. Add a **Verifier agent**
+(checks drafts against web sources now that `web_search` works) and a **Compliance agent** (replaces the
+3-phrase Legal keyword screen where the stakes justify it).
+
+**Exit gate:** at least one department's deliverable is an *executed artifact* (a file, a booking, a running
+check), not a description.
+
+### Phase D - Make it safe to share (do before a second user, not before)
+Postgres + Alembic; DB-backed job table + one worker (fixes lost in-flight replies and enables real
+parallelism); encrypt stored API keys; login rate-limit and locked-down `POST /orgs`; real JWT secret
+required outside localhost; per-model OpenRouter pricing so the budget cap protects that provider.
+
+**Exit gate:** two orgs run concurrently without lock errors; no secret is stored in plaintext.
+
+### Parked (explicitly not now)
+OrgOS-style dynamic restructuring and competing-objective negotiation; additional departments/personas; voice;
+hire-an-agent; Playbook A/B. Revisit only if Phase A-B metrics show the bottleneck is allocation, not quality.
 
 ### Always
-- **Run one real deal.** The machine works; conversion is unmeasured. No amount of additional code substitutes for one real client accepting one real proposal.
+Run real work, read the five metrics, and let them - not the roadmap - decide what is next.
 
 ---
 
@@ -264,7 +340,7 @@ Ordered by distance from revenue.
 | `app/static/console.html` | the entire UI — dark-sidebar/light-content theme, full-screen team chat, Agents tab with inline edit + history |
 | `scripts/run_one_deal.py` | live end-to-end proposal rehearsal |
 | `tests/test_console_endpoints_smoke.py` | HTTP-level smoke test over every console GET endpoint — add new console-facing endpoints here |
-| `docs/STATUS.md` | **stale, superseded by this file** — do not trust it |
+| `docs/STATUS.md`, `docs/phase-*.md` | **historical** (original build phases 0-7) - superseded by this file; the plan lives in section 1b and section 8 |
 
 ---
 
