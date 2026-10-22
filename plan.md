@@ -320,7 +320,7 @@ required outside localhost; per-model OpenRouter pricing so the budget cap prote
 - [x] A1 Deterministic validator (`services/validate.py`): placeholders, unapproved prices, past schedule dates, filler; wired into task review (ahead of the Critic) and proposals (one targeted retry, then flagged with reasons)
 - [x] A2 Price list (`Organization.price_list`, API, console field, injected into every brief)
 - [x] A3 Setup checklist (`GET /console/readiness` + dashboard banner): model / company profile / price list
-- [ ] A4 Five-metric panel (`GET /console/metrics`) + dashboard tiles
+- [x] A4 Five-metric panel (`GET /console/metrics`, `services/metrics.py`) + dashboard tiles. **Baseline on Launch Co (2026-10-23, 89 artifacts): first-pass 62%, needs-a-human 34%, human-edit 0% (nobody annotates), 1 of 3 proposals approved, $0.06 spent, 32s median to first output, 0 deals signed.** Beat these.
 - [ ] A5 Cloud-model first-run: key entry + sane default model + header shows model/spend/"Ollama unreachable"
 - [ ] A6 Email send (approval-gated, irreversible, simulation-aware)
 - [ ] A7 Invoice on accept; booking link in proposal

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.auth import Principal, current_principal
 from app.db import get_db
 from app.models import ApprovalRequest, Artifact, Organization, Project, Task, Thread
-from app.services import governance, scheduling
+from app.services import governance, metrics, scheduling
 
 router = APIRouter(tags=["console"])
 
@@ -58,6 +58,12 @@ def standup(db: Session = Depends(get_db), p: Principal = Depends(current_princi
         },
         "controls": {"killed": org.killed, "simulation": org.simulation},
     }
+
+
+@router.get("/console/metrics")
+def metrics_view(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> dict:
+    """The five numbers the roadmap is judged by. None means "no data yet", not zero."""
+    return metrics.compute(db, p.org_id)
 
 
 @router.get("/console/readiness")

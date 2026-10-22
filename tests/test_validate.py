@@ -250,3 +250,36 @@ def test_readiness_reports_what_is_missing(db):
         assert c.get("/settings/profile", headers=h).json()["price_list"] == PRICES
     finally:
         app.dependency_overrides.clear()
+
+
+# ---------- metrics ----------
+
+def test_metrics_say_none_not_zero_when_there_is_no_data(db):
+    from app.services import metrics
+
+    m = metrics.compute(db, _org(db))
+    assert m["deals_signed"] == 0 and m["first_pass_rate"] is None and m["cost_per_deal_usd"] is None
+    assert m["median_seconds_to_first_output"] is None
+
+
+def test_metrics_reflect_real_work(db):
+    from app.models import Annotation, AgentRun, ProposalAcceptance
+    from app.services import metrics
+
+    org_id = _org(db)
+    project, _tasks = planning.draft_project(db, org_id, "Deliver a client engagement")
+    db.commit()
+    planning.approve_project(db, project)
+    planning.execute_project(db, project)  # Echo: every artifact passes first time
+    sam = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Sam Sales Agent")).first()
+    db.add(AgentRun(org_id=org_id, actor_id=sam.id, status="succeeded", cost_usd=0.5))
+    first_art = db.scalars(select(planning.Artifact)).first()
+    db.add(Annotation(org_id=org_id, artifact_id=first_art.id, text="tweak"))
+    db.add(ProposalAcceptance(org_id=org_id, project_id=project.id, signer_name="J"))
+    db.commit()
+
+    m = metrics.compute(db, org_id)
+    assert m["deals_signed"] == 1 and m["first_pass_rate"] == 1.0
+    assert 0 < m["human_edit_rate"] < 1  # exactly one artifact was annotated
+    assert m["spent_usd"] == 0.5 and m["cost_per_deal_usd"] == 0.5
+    assert m["median_seconds_to_first_output"] is not None and m["median_seconds_to_first_output"] >= 0
