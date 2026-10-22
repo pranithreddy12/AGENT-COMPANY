@@ -61,13 +61,14 @@ def main() -> None:
     db.commit()
 
     # count first-draft validator failures (the number that says whether grounding works)
-    stats = {"drafts": 0, "draft_issues": 0}
+    stats = {"drafts": 0, "draft_issues": 0, "details": []}
     real = planning._draft_issues
 
     def counting(db_, org_, actor, content):
         out = real(db_, org_, actor, content)
         stats["drafts"] += 1
         stats["draft_issues"] += bool(out)
+        stats["details"].extend(f"{i.kind}: {i.detail}" for i in out)
         return out
 
     planning._draft_issues = counting
@@ -83,6 +84,7 @@ def main() -> None:
         db.add(task)
         db.commit()
         before_cost, t0, d0 = governance.spent(db, org_id), time.monotonic(), stats["draft_issues"]
+        n0 = len(stats["details"])
         try:
             art = planning.rerun_task(db, project, task)
             err = None
@@ -94,6 +96,7 @@ def main() -> None:
             "first_draft_clean": stats["draft_issues"] == d0,
             "needs_human": bool(art and art.needs_human), "blocked": bool(art and art.blocked),
             "revisions": (art.version - 1) if art else None,
+            "validator_flags": stats["details"][n0:],
             "reasons": (art.critic_reasons if art else None) or ([err] if err else []),
             "preview": ((art.content or "")[:240].replace("\n", " ") if art else ""),
         })

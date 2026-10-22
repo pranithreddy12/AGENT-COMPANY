@@ -283,3 +283,16 @@ def test_metrics_reflect_real_work(db):
     assert 0 < m["human_edit_rate"] < 1  # exactly one artifact was annotated
     assert m["spent_usd"] == 0.5 and m["cost_per_deal_usd"] == 0.5
     assert m["median_seconds_to_first_output"] is not None and m["median_seconds_to_first_output"] >= 0
+
+
+def test_double_brace_merge_fields_are_the_sanctioned_way_to_say_unknown():
+    assert kinds("Hi {{client_name}}, your campaign at {{clinic_name}} is one week in.") == []
+    issues = validate.check("Hi [Client Name]", today=TODAY)
+    assert "{{merge_field}}" in issues[0].fix  # the retry is told the legal alternative
+
+
+def test_agents_and_critic_are_told_about_merge_fields(db):
+    from app.services import company, review
+
+    assert "{{client_name}}" in company.company_context(db, _org(db))
+    assert "{{client_name}}" in review._CRITIC_SYSTEM

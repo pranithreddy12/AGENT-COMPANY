@@ -67,7 +67,8 @@ def check(text: str, *, price_list: str | None = None, today: date | None = None
         seen.add(label.lower())
         issues.append(Issue("placeholder", f"[{label}]",
                             f"Replace [{label}] with the real value from the company profile, or remove that line. "
-                            "If the value genuinely is not known, say so plainly instead of leaving a bracket."))
+                            "If the value genuinely is not known (e.g. which client a template is for), write a {{merge_field}} "
+                            "such as {{client_name}} instead - never square brackets, never an invented value."))
     if _FILLER_WORDS.search(text):
         issues.append(Issue("filler", _FILLER_WORDS.search(text).group(0),
                             "Remove filler / template wording; write the actual content."))

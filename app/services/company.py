@@ -28,6 +28,8 @@ def company_context(db: Session, org_id: str) -> str:
         lines.append("No price list is configured: write [price to confirm] wherever a price would go.")
     lines.append(
         "Use these facts directly - write the real company name, never [Company Name] or similar. "
-        "Do not invent facts about the company that are not stated here."
+        "Do not invent facts about the company that are not stated here. "
+        "If some other detail is genuinely not given (e.g. which client a generic template is for), write it as a "
+        "double-brace merge field like {{client_name}} - never in square brackets, and never invent it."
     )
     return "\n".join(lines)
