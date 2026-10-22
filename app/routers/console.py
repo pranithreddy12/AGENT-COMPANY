@@ -60,6 +60,26 @@ def standup(db: Session = Depends(get_db), p: Principal = Depends(current_princi
     }
 
 
+@router.get("/console/readiness")
+def readiness(db: Session = Depends(get_db), p: Principal = Depends(current_principal)) -> dict:
+    """What the org still has to set up before agents can do useful, trustworthy work. Each item names
+    the concrete consequence of leaving it empty, so the console can explain instead of just nagging."""
+    from app.services import llm
+
+    org = db.get(Organization, p.org_id)
+    real_model = bool(org.llm_provider) and org.llm_provider != "echo" and (
+        org.llm_provider == "ollama" or bool(llm.resolve_api_key(db, p.org_id, org.llm_provider)))
+    items = [
+        {"key": "model", "done": real_model, "label": "Connect a real model",
+         "why": "Agents are on the built-in demo (Echo) until you pick a provider + key (Governance -> Model)."},
+        {"key": "profile", "done": bool((org.profile or "").strip()), "label": "Describe your company",
+         "why": "Without it agents only know your name and write generic work that QA rejects."},
+        {"key": "prices", "done": bool((org.price_list or "").strip()), "label": "Add your price list",
+         "why": "Without it proposals say [price to confirm] everywhere - no invented quotes."},
+    ]
+    return {"ready": all(i["done"] for i in items), "items": items}
+
+
 @router.get("/console")
 def console_page():
     # no-cache so browsers never serve a stale console after an update

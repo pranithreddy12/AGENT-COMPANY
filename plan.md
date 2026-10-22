@@ -70,6 +70,24 @@ and when the client signs I get a delivery plan with drafts I mostly just approv
 
 ---
 
+## 1c. Research behind the redesign (2026-10-23)
+
+Web research (sources are mostly vendor/practitioner write-ups, so treat numbers as indicative, not proven):
+
+| Finding | Source | What we changed |
+|---|---|---|
+| Multi-agent systems fail mostly on *specification, coordination and verification* (one cited trace study: 41-86% failure on benchmarks, ~79% not model capability). | [Galileo](https://galileo.ai/blog/multi-agent-llm-systems-fail), [Redis](https://redis.io/blog/why-multi-agent-llm-systems-fail/), [Orq](https://orq.ai/blog/why-do-multi-agent-llm-systems-fail) | Verification is now deterministic code first (`services/validate.py`); Critic only judges drafts that already pass. |
+| Handoffs are the weak point: wrong context to the wrong agent. Single agents often beat multi-agent on *sequential* work (coordination overhead > parallelism gain). | [Redis](https://redis.io/blog/why-multi-agent-llm-systems-fail/), [Toucan](https://www.toucantoco.com/en/blog/error-handling-observability-multi-agents-system) | Phase B adds a measured A/B: single-agent vs the department DAG on the golden set. We keep the DAG only where it wins. |
+| Independent judge/validation loops lifted one pipeline from ~10% to ~70% accuracy (single vendor example). | [Galileo](https://galileo.ai/blog/multi-agent-llm-systems-fail) | Validator + targeted retry before the paid Critic. |
+| Proposal tools earn trust by (a) restricting drafts to approved sources, (b) **keeping prices out of the model's hands** (insert from a price source, escalate exceptions), (c) human sign-off on pricing/non-standard terms, (d) promoting autonomy only when rework/cycle time fall. | [Pedowitz](https://www.pedowitzgroup.com/what-role-can-ai-agents-play-in-proposal-generation-no-touch-rfp-guide), [AutogenAI](https://autogenai.com/?p=7746) | `Organization.price_list`; every amount in a proposal must be one of those, enforced in code; no list => `[price to confirm]`. |
+| Structured output: validate deterministically, **cap retries at ~2**, send the validation error back, log/route to fallback after; retries are a hidden cost line. | [MLflow](https://mlflow.org/articles/structured-outputs-llm/), [tianpan](https://tianpan.co/blog/2026/04/10/structured-output-reliability-llm-production) | Max one targeted retry on proposals; retries are metered like any call. Track invalid-output rate as a release gate (Phase B evals). |
+| Evals for these systems are under-documented; the useful measurements are win rate, cycle time, rework and exception volume. | same proposal sources | The five-metric panel (`/console/metrics`) and a golden set in Phase B. |
+
+**Net effect on direction:** fewer free-form agents, more *workflow with narrow LLM steps and code checks around them*; measure
+before adding agents. This reinforces section 1b rather than changing it.
+
+---
+
 ## 2. How to run it
 
 ```bash
@@ -294,6 +312,28 @@ parallelism); encrypt stored API keys; login rate-limit and locked-down `POST /o
 required outside localhost; per-model OpenRouter pricing so the budget cap protects that provider.
 
 **Exit gate:** two orgs run concurrently without lock errors; no secret is stored in plaintext.
+
+### Execution tracker (update as items land)
+
+**Phase A**
+- [x] A0 Plan redesigned + research recorded (this section)
+- [x] A1 Deterministic validator (`services/validate.py`): placeholders, unapproved prices, past schedule dates, filler; wired into task review (ahead of the Critic) and proposals (one targeted retry, then flagged with reasons)
+- [x] A2 Price list (`Organization.price_list`, API, console field, injected into every brief)
+- [x] A3 Setup checklist (`GET /console/readiness` + dashboard banner): model / company profile / price list
+- [ ] A4 Five-metric panel (`GET /console/metrics`) + dashboard tiles
+- [ ] A5 Cloud-model first-run: key entry + sane default model + header shows model/spend/"Ollama unreachable"
+- [ ] A6 Email send (approval-gated, irreversible, simulation-aware)
+- [ ] A7 Invoice on accept; booking link in proposal
+- [ ] A8 Real deal run + record the metrics (needs you: a real model key and a real prospect)
+
+**Phase B**
+- [ ] B1 Golden-task eval set + `scripts/eval_golden.py` (invalid-output rate, first-pass rate, per model) + A/B single-agent vs DAG
+- [ ] B2 Parallel execution of independent DAG levels
+- [ ] B3 Failed task blocks dependents + "retry from here"; `/runs`, `/tasks/{id}/rerun` become background + poll
+- [ ] B4 Edit capture -> Playbook `RULE:` suggestions
+- [ ] B5 Client portal v2 (approve/comment)
+
+Phases C and D as listed above.
 
 ### Parked (explicitly not now)
 OrgOS-style dynamic restructuring and competing-objective negotiation; additional departments/personas; voice;

@@ -50,6 +50,8 @@ def _migrate_sqlite() -> None:
         for col in ("llm_provider", "llm_model"):
             if col not in org_cols:
                 conn.exec_driver_sql(f"ALTER TABLE organizations ADD COLUMN {col} VARCHAR")
+        if "price_list" not in org_cols:
+            conn.exec_driver_sql("ALTER TABLE organizations ADD COLUMN price_list TEXT")
         if "profile" not in org_cols:
             conn.exec_driver_sql("ALTER TABLE organizations ADD COLUMN profile TEXT")
         if "llm_api_keys" not in org_cols:

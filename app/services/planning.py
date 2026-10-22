@@ -16,6 +16,7 @@ from app.models import (
     Artifact,
     Department,
     MemoryRecord,
+    Organization,
     Playbook,
     Project,
     Task,
@@ -24,6 +25,7 @@ from app.models import (
 from app.services import (
     agent_memory,
     company,
+    validate,
     cost,
     communication,
     events,
@@ -321,6 +323,16 @@ def _brief(task: Task, dept_name: str | None, context: str, company_ctx: str = "
     return b
 
 
+def _draft_issues(db: Session, org_id: str, actor: Actor, content: str) -> list[validate.Issue]:
+    """Deterministic checks on a produced draft. Skipped for Echo: the demo provider echoes the prompt
+    back, which itself says "never [Company Name]", so every Echo draft would "fail" its own brief."""
+    prof = db.get(AgentProfile, actor.agent_profile_id) if actor.agent_profile_id else None
+    if prof is None or prof.provider == "echo":
+        return []
+    org = db.get(Organization, org_id)
+    return validate.check(content, price_list=org.price_list if org else None)
+
+
 def _run_and_review(
     db: Session, project: Project, task: Task, critic: Actor | None, context: str = ""
 ) -> Artifact:
@@ -369,6 +381,16 @@ def _run_and_review(
             return art
         content = (run.result or {}).get("text", "")
         art.content, art.version = content, art.version + 1
+        issues = _draft_issues(db, project.org_id, actor, content)
+        if issues:
+            # code found a concrete defect: send the producer back with the exact fixes, WITHOUT paying
+            # a Critic call to say the same thing less precisely (and less reliably)
+            art.critic_reasons = [f"{i.kind}: {i.detail}" for i in issues]
+            feedback = (
+                f"\n\n{validate.as_feedback(issues)}"
+                f"\n\n--- Your previous draft ---\n{content}\n--- end of previous draft ---"
+            )
+            continue
         try:
             verdict = _review(
                 db, project.org_id, critic, content, task.acceptance_criteria, playbook

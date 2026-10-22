@@ -21,6 +21,11 @@ def company_context(db: Session, org_id: str) -> str:
     profile = (org.profile or "").strip()
     if profile:
         lines.append(profile[:PROFILE_MAX_CHARS])
+    prices = (org.price_list or "").strip()
+    if prices:
+        lines.append("Approved prices (use ONLY these amounts, exactly as written):\n" + prices[:PROFILE_MAX_CHARS])
+    else:
+        lines.append("No price list is configured: write [price to confirm] wherever a price would go.")
     lines.append(
         "Use these facts directly - write the real company name, never [Company Name] or similar. "
         "Do not invent facts about the company that are not stated here."

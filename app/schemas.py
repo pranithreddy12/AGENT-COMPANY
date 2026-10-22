@@ -339,3 +339,4 @@ class LLMSettingsIn(BaseModel):
 
 class ProfileIn(BaseModel):
     profile: str = ""
+    price_list: str | None = None  # None = leave unchanged

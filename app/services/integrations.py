@@ -17,9 +17,9 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import SessionLocal
 from app.models import (
-    Account, Actor, AgentProfile, Artifact, Contact, Department, Lead, Project, ProposalAcceptance, Task,
+    Account, Actor, AgentProfile, Artifact, Contact, Department, Lead, Organization, Project, ProposalAcceptance, Task,
 )
-from app.services import llm, planning, research, review, runs
+from app.services import llm, planning, research, review, runs, validate
 
 _PROPOSAL_SYSTEM = (
     "You are a senior consultant at an automation agency, writing a proposal that will be sent to the "
@@ -257,6 +257,25 @@ def _produce_proposal_artifact(db: Session, project: Project, hf) -> tuple[Artif
         _fail_proposal(project)
         return None, False
 
+    # deterministic gate: placeholders / unapproved prices / past dates. ONE targeted retry (retries
+    # past 2 attempts mostly burn money), then keep the best draft and flag exactly why for the human.
+    org = db.get(Organization, org_id)
+    price_list = org.price_list if org else None
+    issues = validate.check(text, price_list=price_list, require_price_list=True)
+    if issues:
+        try:
+            fix = llm.complete_with_retry(
+                provider, system=_PROPOSAL_SYSTEM,
+                messages=[{"role": "user", "content": user},
+                          {"role": "assistant", "content": text},
+                          {"role": "user", "content": validate.as_feedback(issues) + "\n\nReturn the full corrected proposal."}],
+                tools=[], max_tokens=3000)
+            fixed = (fix.text or "").strip()
+            if fixed:
+                text, issues = fixed, validate.check(fixed, price_list=price_list, require_price_list=True)
+        except Exception:
+            pass  # keep the first draft; its issues are recorded below
+
     legal = review.legal_review(text)  # coarse keyword screen only — human approval is the real send gate
     task = Task(org_id=org_id, project_id=project.id, goal=f"Client proposal for {hf.company}",
                 department_id=dept.id if dept else None, assignee_actor_id=sales.id if sales else None,
@@ -265,7 +284,8 @@ def _produce_proposal_artifact(db: Session, project: Project, hf) -> tuple[Artif
     db.flush()
     art = Artifact(org_id=org_id, task_id=task.id, type="proposal", content=text,
                    produced_by_actor_id=sales.id if sales else None, status="needs_human", needs_human=True,
-                   blocked=not legal.passed, block_reason=None if legal.passed else "; ".join(legal.reasons))
+                   blocked=not legal.passed, block_reason=None if legal.passed else "; ".join(legal.reasons),
+                   critic_reasons=[f"{i.kind}: {i.detail}" for i in issues] or None)
     db.add(art)
     db.flush()
     project.status = "ready"  # generated; awaiting human approval before LeadForge may send

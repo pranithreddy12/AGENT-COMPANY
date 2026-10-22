@@ -45,6 +45,9 @@ class Organization(Base):
     # free-text "about this company" (what it sells, to whom, tone, current clients/offers). Injected
     # into every agent's brief so deliverables use real specifics instead of [Company Name] placeholders.
     profile: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # the org's approved prices, free text ("Starter: $1,200/month"). The ONLY amounts a proposal may
+    # contain - enforced by services/validate.py, never left to the model.
+    price_list: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 

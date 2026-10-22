@@ -783,6 +783,17 @@ V.dashboard = async () => {
   const el = document.getElementById('view');
   el.innerHTML = '';
 
+  const rd = await api('GET','/console/readiness').catch(()=>null);
+  if(rd && !rd.ready){
+    el.append($(`<div class="panel" style="border-left:3px solid var(--gold,#c9a24a)">
+      <h2>Finish setup — so agents produce work you can use</h2>
+      <div style="margin-top:12px">${rd.items.map(i=>`<div style="padding:6px 0">
+        ${i.done?'<span class="badge b-ok">done</span>':'<span class="badge b-warn">todo</span>'}
+        <b style="margin-left:8px">${esc(i.label)}</b>
+        ${i.done?'':`<div class="faint" style="margin:3px 0 0 52px">${esc(i.why)}</div>`}</div>`).join('')}</div>
+      <div class="row" style="margin-top:12px"><button class="btn btn-primary" onclick="go('controls')">Open Governance</button></div></div>`));
+  }
+
   el.append($(`<div class="hero">
     <div class="hero-orb"><i class="o3"></i><i class="o2"></i><i class="o1"></i></div>
     <div class="hero-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg></div>
@@ -1077,6 +1088,9 @@ async function profilePanel(){
       real details instead of <code>[Company Name]</code> placeholders (which QA rejects).</p>
     <textarea id="co-profile" rows="6" maxlength="${c.max_chars}" style="width:100%;resize:vertical"
       placeholder="e.g. We are a 6-person med-spa marketing agency in Dubai. We sell Instagram-led lead generation to clinics, from $1.2k/month. Tone: warm, direct, no hype.">${esc(c.profile)}</textarea>
+    <label style="display:block;margin-top:16px">Price list — the only amounts proposals may contain</label>
+    <textarea id="co-prices" rows="4" maxlength="${c.max_chars}" style="width:100%;resize:vertical"
+      placeholder="Starter: $1,200/month&#10;Growth: $2,500/month&#10;One-off audit: $900">${esc(c.price_list)}</textarea>
     <div class="row" style="margin-top:12px"><button class="btn btn-primary" onclick="saveProfile()">Save profile</button></div>
     <div class="faint" id="co-msg" style="margin-top:10px"></div></div>`;
 }
@@ -1084,7 +1098,8 @@ async function saveProfile(){
   const msg = document.getElementById('co-msg');
   msg.textContent = 'Saving…';
   try{
-    await api('POST','/settings/profile',{profile: document.getElementById('co-profile').value});
+    await api('POST','/settings/profile',{profile: document.getElementById('co-profile').value,
+                                          price_list: document.getElementById('co-prices').value});
     toast('Company profile saved — agents will use it on their next task','ok');
     msg.textContent = '';
   }catch(e){ msg.textContent = 'Error '+(e.status||'')+': '+(e.detail||''); }
