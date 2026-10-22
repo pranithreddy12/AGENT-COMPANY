@@ -183,3 +183,18 @@ def test_complete_with_retry_gives_up_after_the_attempt_budget():
     with pytest.raises(httpx.HTTPStatusError):
         llm.complete_with_retry(prov, base_delay=0, system="", messages=[], tools=[], max_tokens=5)
     assert len(prov.calls) == 3
+
+
+def _quota_error():
+    req = httpx.Request("POST", "http://x")
+    return httpx.HTTPStatusError("429", request=req, response=httpx.Response(
+        429, request=req, headers={"x-ratelimit-limit-req-minute": "0"}))
+
+
+def test_a_zero_quota_429_is_not_retried_and_is_explained_as_an_account_problem():
+    prov = _Scripted([_quota_error(), _text("never reached")])
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        llm.complete_with_retry(prov, base_delay=0, system="", messages=[], tools=[], max_tokens=5)
+    assert len(prov.calls) == 1  # waiting cannot fix a limit of 0
+    msg = llm.explain_error(ei.value)
+    assert "no quota" in msg and "billing" in msg and "try again" not in msg

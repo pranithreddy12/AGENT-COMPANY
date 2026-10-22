@@ -701,6 +701,7 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
     # finished work and re-announcing it. A task already done with a clean artifact keeps that
     # artifact (downstream tasks still read it as context); only unfinished/blocked tasks run again.
     already_done: set[str] = set()
+    failed_ids: set[str] = set()  # tasks whose run failed (or were held because an upstream did) this pass
     for a in db.scalars(select(Artifact).where(Artifact.task_id.in_(list(tasks))).order_by(Artifact.created_at)):
         t0 = tasks[a.task_id]
         if t0.status == "done" and not a.needs_human and not a.blocked and a.content:
@@ -718,6 +719,19 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
     for tid in order:
         t = tasks[tid]
         if t.assignee_actor_id is None or tid in already_done:
+            continue
+        broken_up = [d for d in t.depends_on if d in failed_ids]
+        if broken_up:
+            # an upstream RUN failed (provider error, timeout...): its output does not exist, so doing
+            # this task would burn a model call writing around a hole. Hold it - and everything below
+            # it - until the cause is fixed; re-running the project resumes from here.
+            failed_ids.add(tid)
+            t.status = "blocked"
+            who = _name(actors, t) or "An agent"
+            up = " and ".join(f"“{' '.join(tasks[d].goal.split())[:50]}”" for d in broken_up)
+            _post(db, project, t.assignee_actor_id,
+                  f"{who}: not starting “{' '.join(t.goal.split())[:60]}” - {up} didn't finish. "
+                  "Fix that first, then run the project again and I'll pick this up.")
             continue
         blocked_now = governance.run_block_reason(db, project.org_id, t.department_id)
         if blocked_now:
@@ -754,6 +768,8 @@ def execute_project(db: Session, project: Project) -> list[Artifact]:
         context = _gather_context(db, project, t, tasks, artifacts_by_task, depts)
         art = _run_and_review(db, project, t, critic, context=context)
         artifacts_by_task[t.id] = art
+        if any(str(r).startswith("run failed") for r in (art.critic_reasons or [])):
+            failed_ids.add(t.id)
         if not art.needs_human and art.content:
             _remember(
                 db, project, t, art, depts

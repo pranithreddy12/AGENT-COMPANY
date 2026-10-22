@@ -631,12 +631,24 @@ def build_provider(provider: str, model: str, api_key: str | None):
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
+def _no_quota(resp) -> bool:
+    """429 with a published per-minute limit of 0 (observed live: Mistral key with no plan/credit) is
+    an account problem, not congestion - retrying only burns time and then lies with "try again"."""
+    try:
+        return any(k.lower().startswith("x-ratelimit-limit") and str(v).strip() == "0"
+                   for k, v in resp.headers.items())
+    except Exception:
+        return False
+
+
 def _is_transient(e: Exception) -> bool:
     """A failure worth retrying: rate limit / server error / couldn't connect. NOT a read timeout —
     on a slow local model that means "still thinking", and retrying would just double the wait."""
     import httpx
 
     if isinstance(e, httpx.HTTPStatusError):
+        if e.response.status_code == 429 and _no_quota(e.response):
+            return False  # a limit of 0 will never clear by waiting
         return e.response.status_code in _RETRY_STATUS
     if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError)):
         return True
@@ -665,6 +677,9 @@ def explain_error(e: Exception) -> str:
 
     if isinstance(e, httpx.HTTPStatusError):
         code = e.response.status_code
+        if code == 429 and _no_quota(e.response):
+            return ("the API key has no quota (the provider reports a limit of 0 requests/minute) - "
+                    "check the plan / billing / credit for this key, or switch provider in Governance -> Model")
         hint = {
             400: "the request was rejected — check the model name",
             401: "the API key was rejected — check it in Governance -> Model",

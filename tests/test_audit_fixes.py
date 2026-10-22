@@ -482,3 +482,42 @@ def test_profile_api_roundtrip_is_ceo_only_and_length_bounded():
         assert c.post("/settings/profile", headers=ceo, json={"profile": "x" * 4001}).status_code == 422
     finally:
         app.dependency_overrides.clear()
+
+
+# ---------- a failed run holds its dependents instead of burning calls around the hole ----------
+
+def test_a_failed_task_holds_everything_downstream_and_resume_continues(db, monkeypatch):
+    org_id = _org(db)
+    project, tasks = planning.draft_project(db, org_id, "Deliver a client engagement")
+    db.commit()
+    planning.approve_project(db, project)
+    by_goal = {t.goal: t for t in tasks}
+    real = planning.runs.execute
+    state = {"fail": True, "ran": []}
+
+    def flaky(db_, run, extra_system=""):
+        # the agent's own task line is the LAST "Your task:" (upstream context embeds earlier ones)
+        goal = run.trigger.rsplit("Your task: ", 1)[1].splitlines()[0]
+        if state["fail"] and goal == "Draft technical spec":
+            return runs._finish(db_, run, "failed", error="model call: provider exploded")
+        state["ran"].append(goal)
+        return real(db_, run, extra_system=extra_system)
+
+    monkeypatch.setattr(planning.runs, "execute", flaky)
+    planning.execute_project(db, project)
+
+    # t1 (Sales) and t3 (Legal) don't depend on the broken spec and ran; everything under it was held
+    assert sorted(state["ran"]) == ["Qualify client and confirm scope", "Review contract and compliance"]
+    for goal in ("Draft technical spec", "Draft test plan", "Draft launch announcement copy",
+                 "Finalize delivery schedule", "Compile client status update"):
+        assert by_goal[goal].status == "blocked", goal
+    msgs = [m.content for m in db.scalars(select(Message))]
+    assert any("not starting" in m and "Draft technical spec" in m for m in msgs)
+    assert db.get(planning.Project, project.id).status == "active"
+
+    # cause fixed -> "Run" again resumes: only the unfinished tasks execute, nothing finished is redone
+    state["fail"], state["ran"] = False, []
+    planning.execute_project(db, project)
+    assert "Qualify client and confirm scope" not in state["ran"]
+    assert len(state["ran"]) == 5 and all(t.status == "done" for t in tasks)
+    assert db.get(planning.Project, project.id).status == "done"

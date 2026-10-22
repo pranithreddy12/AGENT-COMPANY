@@ -327,9 +327,9 @@ required outside localhost; per-model OpenRouter pricing so the budget cap prote
 - [ ] A8 Real deal run + record the metrics (needs you: a real model key and a real prospect)
 
 **Phase B**
-- [ ] B1 Golden-task eval set + `scripts/eval_golden.py` (invalid-output rate, first-pass rate, per model) + A/B single-agent vs DAG
+- [~] B1 `scripts/eval_golden.py` exists (6 realistic tasks, throwaway in-memory org, reports first-draft-clean / approved-without-human / cost / latency per model; `EVAL_PROVIDER`, `EVAL_MODEL`, `EVAL_TASKS`). TODO: grow the set from real tasks, store baselines, A/B single-agent vs DAG
 - [ ] B2 Parallel execution of independent DAG levels
-- [ ] B3 Failed task blocks dependents + "retry from here"; `/runs`, `/tasks/{id}/rerun` become background + poll
+- [~] B3 DONE: a failed run now holds all its dependents (no wasted calls) and "Run" resumes from there. TODO: `/runs` and `/tasks/{id}/rerun` still synchronous; a visible "retry from here" button
 - [ ] B4 Edit capture -> Playbook `RULE:` suggestions
 - [ ] B5 Client portal v2 (approve/comment)
 

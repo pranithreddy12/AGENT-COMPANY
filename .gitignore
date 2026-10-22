@@ -10,3 +10,4 @@ venv/
 eval_ollama.db
 eval_live.db
 company_os.db*
+eval_golden_last.json
