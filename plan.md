@@ -321,14 +321,14 @@ required outside localhost; per-model OpenRouter pricing so the budget cap prote
 - [x] A2 Price list (`Organization.price_list`, API, console field, injected into every brief)
 - [x] A3 Setup checklist (`GET /console/readiness` + dashboard banner): model / company profile / price list
 - [x] A4 Five-metric panel (`GET /console/metrics`, `services/metrics.py`) + dashboard tiles. **Baseline on Launch Co (2026-10-23, 89 artifacts): first-pass 62%, needs-a-human 34%, human-edit 0% (nobody annotates), 1 of 3 proposals approved, $0.06 spent, 32s median to first output, 0 deals signed.** Beat these.
-- [ ] A5 Cloud-model first-run: key entry + sane default model + header shows model/spend/"Ollama unreachable"
-- [ ] A6 Email send (approval-gated, irreversible, simulation-aware)
-- [ ] A7 Invoice on accept; booking link in proposal
-- [ ] A8 Real deal run + record the metrics (needs you: a real model key and a real prospect)
+- [~] A5 (readiness checklist covers 'connect a real model'; **blocked on you:** the Mistral key in `.env` returns 429 with a published limit of 0 req/min = no plan/credit - fix billing or use another key). TODO: header chip with model/spend/"Ollama unreachable". Cloud-model first-run: key entry + sane default model + header shows model/spend/"Ollama unreachable"
+- [ ] A6 (needs your email-provider account) Email send (approval-gated, irreversible, simulation-aware)
+- [ ] A7 (needs your Stripe/Cal.com accounts) Invoice on accept; booking link in proposal
+- [ ] A8 (needs you) Real deal run + record the metrics (needs you: a real model key and a real prospect)
 
 **Phase B**
 - [~] B1 `scripts/eval_golden.py` exists (6 realistic tasks, throwaway in-memory org, reports first-draft-clean / approved-without-human / cost / latency per model; `EVAL_PROVIDER`, `EVAL_MODEL`, `EVAL_TASKS`). TODO: grow the set from real tasks, store baselines, A/B single-agent vs DAG
-- [ ] B2 Parallel execution of independent DAG levels
+- [ ] B2 Parallel execution of independent DAG levels - deliberately deferred to Phase D: needs a session-per-task design and a DB-backed job table; doing it on daemon threads + SQLite would trade latency for lock errors
 - [~] B3 DONE: a failed run now holds all its dependents (no wasted calls) and "Run" resumes from there. TODO: `/runs` and `/tasks/{id}/rerun` still synchronous; a visible "retry from here" button
 - [ ] B4 Edit capture -> Playbook `RULE:` suggestions
 - [ ] B5 Client portal v2 (approve/comment)
@@ -427,3 +427,13 @@ Suite: 208 tests. Fixes are in commits `d73c007`, `b26d6e5` (and `b0f7bff` befor
 8. OpenRouter models are still registered at $0 (`cost.register_free`), so the budget cap under-protects that provider (see §9).
 
 **Machine notes:** Ollama was not running on 2026-09-19; the app now says so plainly ("couldn't reach the model server"). `company_os.db` is auto-migrated on start (`organizations.profile`).
+
+### Eval baseline (2026-10-23, `scripts/eval_golden.py`, ollama/qwen2.5:7b, 4 tasks, free/local)
+| Run | first-draft clean | approved w/o human | note |
+|---|---|---|---|
+| validator on, no merge fields | 25% | 50% | flags were true positives; "never [Client Name]" unsatisfiable when the task names no client |
+| + `{{merge_field}}` allowance | 50% | 75% | remaining miss = 7B model ignoring the instruction |
+Re-run with a cloud model before trusting any number: the 7B model is the floor, not the product. `POST /runs` and `/tasks/{id}/rerun` are
+synchronous but unused by the console, so left as-is (API-only).
+
+**What the loop could not do without you:** a working cloud key (Mistral key has no quota), a real prospect (A8), email/Stripe/Cal.com accounts (A6-A7).
