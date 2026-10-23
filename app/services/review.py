@@ -4,6 +4,7 @@ Both return structured verdicts. The Critic's revise loop is capped by the calle
 which is what makes it a bounded loop rather than an open-ended negotiation.
 """
 import json
+import re
 from dataclasses import dataclass
 
 
@@ -24,8 +25,22 @@ _CRITIC_SYSTEM = (
     "the recipient is); is a generic template that could apply to any client; restates the task instead of "
     "doing it; or gives vague advice with no concrete specifics. PASS only if it is specific to the "
     "goal, concrete, and actionable. Respond ONLY with JSON: {\"passed\": bool, \"reasons\": [string]} "
-    "— reasons name concrete fixes."
+    "— reasons name concrete fixes. Give AT MOST 4 reasons, one short sentence each."
 )
+
+
+def _salvage(text: str) -> Verdict:
+    """The judge's JSON was cut off mid-list (observed live: a long list of reasons hit the token cap) or
+    wrapped in prose. A clear verdict is still in there: pull "passed" and any COMPLETE reason strings.
+    Still fails closed - no recognisable "passed" means an error verdict, never a silent pass."""
+    m = re.search(r'"passed"\s*:\s*(true|false)', text or "", re.I)
+    if not m:
+        return Verdict(False, ["QA review unavailable: the critic's reply could not be parsed"], error=True)
+    passed = m.group(1).lower() == "true"
+    i = text.lower().find('"reasons"')
+    tail = text[i + len('"reasons"'):] if i >= 0 else ""
+    reasons = [r.strip() for r in re.findall(r'"((?:[^"\\]|\\.){8,})"', tail)]
+    return Verdict(passed, [] if passed else (reasons or ["revision requested"]))
 
 
 def parse_critic_verdict(text: str) -> Verdict:
@@ -37,11 +52,11 @@ def parse_critic_verdict(text: str) -> Verdict:
         passed = bool(data["passed"])
         reasons = [str(r) for r in data.get("reasons", [])]
     except (json.JSONDecodeError, KeyError, TypeError):
-        return Verdict(False, ["QA review unavailable: the critic's reply could not be parsed"], error=True)
+        return _salvage(text)
     return Verdict(passed, [] if passed else (reasons or ["revision requested"]))
 
 
-def llm_critic_review(provider, content: str, acceptance_criteria: str, playbook: str, max_tokens: int = 512) -> Verdict:
+def llm_critic_review(provider, content: str, acceptance_criteria: str, playbook: str, max_tokens: int = 1024) -> Verdict:
     """Real Critic: an LLM judges the artifact. Same Verdict interface as the deterministic critic."""
     rubric = (f"Acceptance criteria: {acceptance_criteria}\n\nPlaybook:\n{playbook}\n\n"
               f"Artifact under review:\n{content}")
@@ -50,8 +65,14 @@ def llm_critic_review(provider, content: str, acceptance_criteria: str, playbook
     messages = [{"role": "user", "content": rubric}]
     verdict = Verdict(False, [], error=True)
     for _ in range(2):  # weak models often wrap or garble the JSON once; one stricter retry fixes most
-        comp = complete_with_retry(provider, system=_CRITIC_SYSTEM, messages=messages, tools=[],
-                                   max_tokens=max_tokens)
+        try:  # JSON mode makes weak models actually return JSON; providers without it just don't get the kwarg
+            comp = complete_with_retry(provider, system=_CRITIC_SYSTEM, messages=messages, tools=[],
+                                       max_tokens=max_tokens, json_mode=True)
+        except TypeError as e:
+            if "json_mode" not in str(e):
+                raise
+            comp = complete_with_retry(provider, system=_CRITIC_SYSTEM, messages=messages, tools=[],
+                                       max_tokens=max_tokens)
         verdict = parse_critic_verdict(comp.text or "")
         if not verdict.error:
             return verdict

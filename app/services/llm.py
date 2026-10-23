@@ -468,10 +468,11 @@ class OllamaProvider:
         )
 
     def complete(
-        self, *, system: str, messages: list[dict], tools: list[dict], max_tokens: int
+        self, *, system: str, messages: list[dict], tools: list[dict], max_tokens: int,
+        json_mode: bool = False,
     ) -> Completion:
         content, inp, out, tool_calls = self._chat(
-            system, messages, max_tokens, tools=tools
+            system, messages, max_tokens, tools=tools, json_mode=json_mode
         )
         if not tool_calls and content and tools:
             content = strip_narrated_tool_calls(content)
@@ -655,6 +656,12 @@ def _is_transient(e: Exception) -> bool:
     return getattr(e, "status_code", None) in _RETRY_STATUS  # anthropic SDK errors carry status_code
 
 
+def _is_local(provider) -> bool:
+    """Plain Ollama (a model on this machine): a read timeout there means "still thinking"."""
+    inner = getattr(provider, "_p", provider)  # unwrap runs.MeteredProvider
+    return type(inner).__name__ == "OllamaProvider"
+
+
 def complete_with_retry(provider, *, attempts: int = 3, base_delay: float = 2.0, **kwargs) -> Completion:
     """provider.complete() with a bounded retry on transient failures. Cloud providers 429/503
     routinely under load; without this one blip failed a whole task (and its Critic/revise cycle)
@@ -665,7 +672,12 @@ def complete_with_retry(provider, *, attempts: int = 3, base_delay: float = 2.0,
         try:
             return provider.complete(**kwargs)
         except Exception as e:
-            if i == attempts - 1 or not _is_transient(e):
+            import httpx
+
+            # a cloud API that stalls past the timeout is worth ONE more try; a local model that
+            # times out is just slow, and retrying would only double the wait
+            cloud_stall = isinstance(e, httpx.ReadTimeout) and not _is_local(provider) and i == 0
+            if i == attempts - 1 or not (_is_transient(e) or cloud_stall):
                 raise
             time.sleep(min(base_delay * (2**i), 20))
 

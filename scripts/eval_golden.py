@@ -64,8 +64,8 @@ def main() -> None:
     stats = {"drafts": 0, "draft_issues": 0, "details": []}
     real = planning._draft_issues
 
-    def counting(db_, org_, actor, content):
-        out = real(db_, org_, actor, content)
+    def counting(db_, org_, actor, content, goal=""):
+        out = real(db_, org_, actor, content, goal)
         stats["drafts"] += 1
         stats["draft_issues"] += bool(out)
         stats["details"].extend(f"{i.kind}: {i.detail}" for i in out)

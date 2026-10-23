@@ -62,6 +62,8 @@ def check(text: str, *, price_list: str | None = None, today: date | None = None
     seen = set()
     for m in _PLACEHOLDER.finditer(text):
         label = m.group(1).strip()
+        if "{" in label or "}" in label:
+            continue  # a merge field the model wrapped in brackets, e.g. [{{client_name}}] - still a merge field
         if label.lower() in _SANCTIONED or label.lower() in seen:
             continue
         seen.add(label.lower())
@@ -105,3 +107,19 @@ def as_feedback(issues: list[Issue]) -> str:
     return "Automated checks failed. Fix EVERY point, keep everything else:\n" + "\n".join(
         f"{i}. {x.detail}: {x.fix}" for i, x in enumerate(issues, 1)
     )
+
+
+def autofix_placeholders(text: str) -> str:
+    """Rewrite bracket placeholders as merge fields: [Client's First Name] -> {{client_s_first_name}}.
+
+    Models ignore "never use square brackets" even after two targeted retries (measured live), but the
+    rule is mechanical, so code applies it: free, instant, and the unknowns stay explicit and findable
+    for the human who fills them in. [price to confirm], markdown links and checkboxes are untouched."""
+    def repl(m: re.Match) -> str:
+        label = m.group(1).strip()
+        if label.lower() in _SANCTIONED or "{" in label or "}" in label:
+            return m.group(0)
+        name = re.sub(r"\W+", "_", label.lower()).strip("_")[:40]
+        return "{{" + name + "}}" if name else m.group(0)
+
+    return _PLACEHOLDER.sub(repl, text or "")

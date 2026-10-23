@@ -16,6 +16,9 @@ RATES: dict[str, tuple[float, float]] = {
     "mistral-small-latest": (0.2, 0.6),
     "mistral-medium-latest": (0.4, 2.0),
     "mistral-large-latest": (2.0, 6.0),
+    "open-mistral-nemo": (0.15, 0.15),
+    "ministral-8b-latest": (0.1, 0.1),
+    "ministral-3b-latest": (0.04, 0.04),
 }
 
 

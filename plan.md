@@ -437,3 +437,13 @@ Re-run with a cloud model before trusting any number: the 7B model is the floor,
 synchronous but unused by the console, so left as-is (API-only).
 
 **What the loop could not do without you:** a working cloud key (Mistral key has no quota), a real prospect (A8), email/Stripe/Cal.com accounts (A6-A7).
+
+### Cloud baseline (2026-10-23, mistral/open-mistral-nemo, 6 tasks, ~$0.005 total, ~21s/task)
+The Mistral key works but its plan gives `mistral-small-latest` a limit of 0 req/min (open-mistral-nemo: 188/min, ministral-3b: 750/min, large: not in plan).
+| Iteration | first-draft clean | approved w/o human | what changed |
+|---|---|---|---|
+| validator v1 | 0% | 0% | price rule fired on every dollar figure (ad spend, client promo prices); bracket placeholders ignored by the model |
+| scoped price rule + bracketed merge fields | 33% | 33% | price list only enforced on Sales / pricing-worded tasks |
+| autofix `[X]` -> `{{x}}` + JSON-mode critic + truncated-JSON salvage + cloud timeout retry | **83%** | **83%** | mechanical rules enforced by code; critic no longer dies on long reasons |
+Remaining miss: outreach copy that invents ROI dollar figures ($3,200 / $8,000 / $15,000) - a true catch; the fix is a "claims" input (real case-study numbers) rather than a looser validator.
+Lesson recorded: *measure the validator on real model output before trusting it* - v1 looked right and was wrong in 3 ways.

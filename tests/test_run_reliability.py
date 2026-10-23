@@ -170,12 +170,25 @@ def test_complete_with_retry_does_not_retry_a_client_error():
     assert len(prov.calls) == 1
 
 
-def test_complete_with_retry_does_not_retry_a_read_timeout():
-    """On a slow local model a read timeout means 'still thinking' — retrying doubles the wait."""
-    prov = _Scripted([httpx.ReadTimeout("slow"), _text("never reached")])
+class OllamaProvider(_Scripted):
+    """Named like the real local provider: complete_with_retry treats a class called OllamaProvider as local."""
+
+
+def test_a_read_timeout_on_a_local_model_is_not_retried():
+    """On a slow local model a read timeout means 'still thinking' - retrying doubles the wait."""
+    prov = OllamaProvider([httpx.ReadTimeout("slow"), _text("never reached")])
     with pytest.raises(httpx.ReadTimeout):
         llm.complete_with_retry(prov, base_delay=0, system="", messages=[], tools=[], max_tokens=5)
     assert len(prov.calls) == 1
+
+
+def test_a_read_timeout_on_a_cloud_api_is_retried_once():
+    prov = _Scripted([httpx.ReadTimeout("stall"), _text("ok")])
+    assert llm.complete_with_retry(prov, base_delay=0, system="", messages=[], tools=[], max_tokens=5).text == "ok"
+    prov2 = _Scripted([httpx.ReadTimeout("stall"), httpx.ReadTimeout("stall"), _text("never")])
+    with pytest.raises(httpx.ReadTimeout):  # one extra try, not an open-ended loop
+        llm.complete_with_retry(prov2, base_delay=0, system="", messages=[], tools=[], max_tokens=5)
+    assert len(prov2.calls) == 2
 
 
 def test_complete_with_retry_gives_up_after_the_attempt_budget():

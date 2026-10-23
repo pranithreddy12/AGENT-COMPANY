@@ -4,6 +4,7 @@ draft -> approve(schedule) -> execute(artifacts). Every Lead planning pass is an
 AgentRun with cost. Task execution reuses the Phase 0 worker executor.
 """
 
+import re
 from datetime import timedelta
 
 from sqlalchemy import select
@@ -323,14 +324,32 @@ def _brief(task: Task, dept_name: str | None, context: str, company_ctx: str = "
     return b
 
 
-def _draft_issues(db: Session, org_id: str, actor: Actor, content: str) -> list[validate.Issue]:
+_PRICE_WORDS = re.compile(r"\b(price|pricing|prices|quote|quotation|package|packages|proposal|invoice|fee|fees|rate card)\b", re.I)
+
+
+def _price_sensitive(dept_name: str | None, goal: str) -> bool:
+    """Is this task one where an amount is OUR quote? The price list governs what WE charge. A status
+    report's ad spend, a client's own promo price in a caption or a tool's cost in a dev playbook are
+    other people's numbers - enforcing the list there flagged nearly every draft (measured live)."""
+    return dept_name == "Sales" or bool(_PRICE_WORDS.search(goal or ""))
+
+
+def _real_provider(db: Session, actor: Actor) -> bool:
+    prof = db.get(AgentProfile, actor.agent_profile_id) if actor.agent_profile_id else None
+    return prof is not None and prof.provider != "echo"
+
+
+def _draft_issues(db: Session, org_id: str, actor: Actor, content: str,
+                  goal: str = "") -> list[validate.Issue]:
     """Deterministic checks on a produced draft. Skipped for Echo: the demo provider echoes the prompt
     back, which itself says "never [Company Name]", so every Echo draft would "fail" its own brief."""
     prof = db.get(AgentProfile, actor.agent_profile_id) if actor.agent_profile_id else None
     if prof is None or prof.provider == "echo":
         return []
     org = db.get(Organization, org_id)
-    return validate.check(content, price_list=org.price_list if org else None)
+    dept = db.get(Department, actor.department_id) if actor.department_id else None
+    prices = org.price_list if org and _price_sensitive(dept.name if dept else None, goal) else None
+    return validate.check(content, price_list=prices)
 
 
 def _run_and_review(
@@ -381,7 +400,10 @@ def _run_and_review(
             return art
         content = (run.result or {}).get("text", "")
         art.content, art.version = content, art.version + 1
-        issues = _draft_issues(db, project.org_id, actor, content)
+        if _real_provider(db, actor):
+            content = validate.autofix_placeholders(content)  # free + deterministic: no model retry needed
+            art.content = content
+        issues = _draft_issues(db, project.org_id, actor, content, task.goal)
         if issues:
             # code found a concrete defect: send the producer back with the exact fixes, WITHOUT paying
             # a Critic call to say the same thing less precisely (and less reliably)

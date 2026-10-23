@@ -261,6 +261,7 @@ def _produce_proposal_artifact(db: Session, project: Project, hf) -> tuple[Artif
     # past 2 attempts mostly burn money), then keep the best draft and flag exactly why for the human.
     org = db.get(Organization, org_id)
     price_list = org.price_list if org else None
+    text = validate.autofix_placeholders(text)
     issues = validate.check(text, price_list=price_list, require_price_list=True)
     if issues:
         try:
@@ -272,7 +273,8 @@ def _produce_proposal_artifact(db: Session, project: Project, hf) -> tuple[Artif
                 tools=[], max_tokens=3000)
             fixed = (fix.text or "").strip()
             if fixed:
-                text, issues = fixed, validate.check(fixed, price_list=price_list, require_price_list=True)
+                text = validate.autofix_placeholders(fixed)
+                issues = validate.check(text, price_list=price_list, require_price_list=True)
         except Exception:
             pass  # keep the first draft; its issues are recorded below
 

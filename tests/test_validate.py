@@ -89,7 +89,7 @@ def _org(db):
     return create_org(OrgCreate(name="Acme", ceo_email="c@a.com", ceo_password="pw"), db).org_id
 
 
-def test_task_draft_with_a_placeholder_is_sent_back_with_exact_fixes_and_skips_the_critic(db, monkeypatch):
+def test_task_draft_with_a_past_deadline_is_sent_back_with_exact_fixes_and_skips_the_critic(db, monkeypatch):
     org_id = _org(db)
     project, tasks = planning.draft_project(db, org_id, "Deliver a client engagement")
     db.commit()
@@ -99,7 +99,7 @@ def test_task_draft_with_a_placeholder_is_sent_back_with_exact_fixes_and_skips_t
     prof.provider, prof.model = "mistral", "mistral-small-latest"
     db.commit()
 
-    drafts = iter(["Hi [Client Name], here is the plan.", "Hi Acme, here is the plan."])
+    drafts = iter(["We will launch by March 2023 as planned.", "We will launch by March 2027 as planned."])
     seen_briefs = []
 
     class _P:
@@ -120,8 +120,8 @@ def test_task_draft_with_a_placeholder_is_sent_back_with_exact_fixes_and_skips_t
 
     art = planning._run_and_review(db, project, task, critic, context="")
 
-    assert art.content == "Hi Acme, here is the plan." and not art.needs_human
-    assert "Automated checks failed" in seen_briefs[1] and "[Client Name]" in seen_briefs[1]  # targeted retry
+    assert art.content == "We will launch by March 2027 as planned." and not art.needs_human
+    assert "Automated checks failed" in seen_briefs[1] and "2023" in seen_briefs[1]  # targeted retry
     assert critic_calls["n"] == 1  # only the clean draft ever reached the paid Critic
 
 
@@ -296,3 +296,92 @@ def test_agents_and_critic_are_told_about_merge_fields(db):
 
     assert "{{client_name}}" in company.company_context(db, _org(db))
     assert "{{client_name}}" in review._CRITIC_SYSTEM
+
+
+def test_bracketed_merge_field_is_not_a_placeholder():
+    assert kinds("Hi [{{client_name}}], welcome.") == []
+
+
+def test_price_list_is_only_enforced_on_pricing_sensitive_tasks(db):
+    org_id = _org(db)
+    db.get(Organization, org_id).price_list = PRICES
+    db.commit()
+    sam = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Sam Sales Agent")).first()
+    mia = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Mia Marketing Agent")).first()
+    for a in (sam, mia):
+        db.get(AgentProfile, a.agent_profile_id).provider = "mistral"
+    db.commit()
+    text = "Special offer: whitening for $499 this month."
+    assert [i.kind for i in planning._draft_issues(db, org_id, sam, text, "write outreach")] == ["price"]  # Sales: ours
+    assert planning._draft_issues(db, org_id, mia, text, "Draft 3 Instagram captions") == []  # client's own promo
+    assert [i.kind for i in planning._draft_issues(db, org_id, mia, text, "Quote our packages")] == ["price"]
+
+
+# ---------- autofix: mechanical rules are applied by code, not re-asked of the model ----------
+
+def test_autofix_turns_bracket_placeholders_into_merge_fields_and_leaves_the_rest():
+    src = "Hi [Client's First Name], see [our site](https://x.com), price [price to confirm], [x] done, [Clinic Name]."
+    out = validate.autofix_placeholders(src)
+    assert out == "Hi {{client_s_first_name}}, see [our site](https://x.com), price [price to confirm], [x] done, {{clinic_name}}."
+    assert validate.check(out, today=TODAY) == []  # and it now passes the validator
+
+
+def test_a_draft_with_only_bracket_placeholders_is_fixed_without_a_retry(db, monkeypatch):
+    org_id = _org(db)
+    project, tasks = planning.draft_project(db, org_id, "Deliver a client engagement")
+    db.commit()
+    task = tasks[0]
+    worker = db.get(Actor, task.assignee_actor_id)
+    db.get(AgentProfile, worker.agent_profile_id).provider = "mistral"
+    db.commit()
+    calls = {"n": 0}
+
+    class _P:
+        def complete(self, **kw):
+            calls["n"] += 1
+            return Completion(text="Hi [Client Name], here is the plan.", input_tokens=1, output_tokens=1)
+
+    from app.services.review import Verdict
+    monkeypatch.setattr(planning.runs, "build_provider", lambda *a, **k: _P())
+    monkeypatch.setattr(planning, "_review", lambda *a, **k: Verdict(True, []))
+    critic = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.role == "critic")).first()
+    art = planning._run_and_review(db, project, task, critic, context="")
+
+    assert art.content == "Hi {{client_name}}, here is the plan." and not art.needs_human
+    assert calls["n"] == 1  # one model call - the retry the model would have ignored never happened
+
+
+def test_critic_asks_for_json_mode_and_falls_back_for_providers_without_it():
+    from app.services import review
+
+    seen = {}
+
+    class _WithJson:
+        def complete(self, *, system, messages, tools, max_tokens, json_mode=False):
+            seen["json_mode"] = json_mode
+            return Completion(text='{"passed": true, "reasons": []}', input_tokens=1, output_tokens=1)
+
+    class _Plain:
+        def complete(self, *, system, messages, tools, max_tokens):
+            return Completion(text='{"passed": true, "reasons": []}', input_tokens=1, output_tokens=1)
+
+    assert review.llm_critic_review(_WithJson(), "c", "a", "p").passed and seen["json_mode"] is True
+    assert review.llm_critic_review(_Plain(), "c", "a", "p").passed  # no kwarg support -> still works
+
+
+# ---------- critic robustness: truncated / wrapped JSON still yields a verdict ----------
+
+def test_a_truncated_critic_reply_still_yields_its_verdict_and_complete_reasons():
+    from app.services import review
+
+    cut = '{\n  "passed": false,\n  "reasons": [\n    "Too generic; add the clinic\'s real numbers.",\n    "No call to action at the e'
+    v = review.parse_critic_verdict(cut)
+    assert v.passed is False and not v.error and v.reasons == ["Too generic; add the clinic's real numbers."]
+
+
+def test_a_truncated_passing_reply_passes_and_garbage_still_fails_closed():
+    from app.services import review
+
+    assert review.parse_critic_verdict('{"passed": true, "reas').passed is True
+    v = review.parse_critic_verdict("Sure! I think it looks great.")
+    assert v.passed is False and v.error  # nothing recognisable -> never a silent pass
