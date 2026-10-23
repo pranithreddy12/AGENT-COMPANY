@@ -58,19 +58,50 @@ def test_repeated_mention_of_same_agent_creates_one_task(db):
     assert len(out["tasks"]) == 1  # deduped — not two tasks for one agent
 
 
-def test_message_without_mentions_creates_no_work(db):
+def test_message_without_mentions_is_answered_by_the_lead_not_ignored(db):
+    """Regression: "hey team" / "he" got NO reply because only @handles counted - the chat looked dead."""
     org_id = _org(db)
     out = teamchat.post(db, org_id, "just thinking out loud about the roadmap")
     db.commit()
-    assert out["tasks"] == []
-    assert db.scalar(select(Task).where(Task.org_id == org_id)) is None
+    assert [t["agent"] for t in out["tasks"]] == ["Cora Lead Agent"]
+    assert out["tasks"][0]["kind"] == "chat"  # conversation (Echo can't read intent) - never a project plan
+    assert db.scalar(select(Task).where(Task.org_id == org_id)) is None  # and no task was created
 
 
-def test_unknown_handle_is_ignored(db):
+def test_a_department_named_in_plain_words_routes_to_that_agent(db):
+    org_id = _org(db)
+    out = teamchat.post(db, org_id, "sales agent plan next move")
+    assert [t["agent"] for t in out["tasks"]] == ["Sam Sales Agent"]
+    both = teamchat.post(db, org_id, "can marketing and legal look at this")
+    assert sorted(t["agent"] for t in both["tasks"]) == ["Lena Legal Agent", "Mia Marketing Agent"]
+    assert [t["agent"] for t in teamchat.post(db, org_id, "need research on competitors")["tasks"]] == ["Rex Research Agent"]
+
+
+def test_explicit_mentions_still_win_over_inference(db):
+    org_id = _org(db)
+    out = teamchat.post(db, org_id, "@mia ask the sales team about this")
+    assert [t["agent"] for t in out["tasks"]] == ["Mia Marketing Agent"]
+
+
+def test_deferred_post_marks_inferred_targets_implicit(db):
+    org_id = _org(db)
+    out = teamchat.post(db, org_id, "hey team", defer=True)
+    assert out["tasks"][0]["kind"] == "pending" and out["tasks"][0]["implicit"] is True
+    assert teamchat.post(db, org_id, "@sam hi", defer=True)["tasks"][0]["implicit"] is False
+
+
+def test_an_agent_authored_message_never_triggers_inference(db):
+    """Agents posting into the chat must not cause more agents to reply to them (no loops)."""
+    org_id = _org(db)
+    sam = teamchat.roster(db, org_id)[0]
+    assert teamchat.post(db, org_id, "status update, all good", sender_actor_id=sam.id)["tasks"] == []
+
+
+def test_unknown_handle_falls_back_to_the_lead(db):
     org_id = _org(db)
     out = teamchat.post(db, org_id, "@nobody do something")
     db.commit()
-    assert out["tasks"] == []
+    assert [t["agent"] for t in out["tasks"]] == ["Cora Lead Agent"]
 
 
 def test_empty_message_rejected(db):
@@ -332,3 +363,26 @@ def test_chat_reply_writes_to_the_agents_own_memory(db):
     mem = db.scalars(select(MemoryRecord).where(
         MemoryRecord.scope == "agent", MemoryRecord.source_actor_id == sam.id)).first()
     assert mem is not None and "Answered in chat" in mem.content
+
+
+def test_chat_replies_are_told_not_to_invent_a_plan_for_a_greeting(db, monkeypatch):
+    from app.models import AgentProfile
+
+    org_id = _org(db)
+    cora = next(a for a in teamchat.roster(db, org_id) if a.role == "lead")
+    prof = db.get(AgentProfile, cora.agent_profile_id)
+    prof.provider, prof.model = "mistral", "mistral-small-latest"
+    db.commit()
+    seen = {}
+
+    class _P:
+        def complete(self, **kw):
+            seen["system"] = kw["system"]
+            from app.services.llm import Completion
+            return Completion(text="Hi! What should we work on?", input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr(teamchat.llm, "build_provider", lambda *a, **k: _P())
+    monkeypatch.setattr(teamchat, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)
+    teamchat.run_chat_reply_in_background(org_id, cora.id, "he")
+    assert "do NOT invent a plan" in seen["system"]

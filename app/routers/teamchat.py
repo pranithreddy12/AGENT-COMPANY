@@ -46,5 +46,5 @@ def post_chat(body: ChatPost, db: Session = Depends(get_db),
     db.commit()  # persist the message before the workers (own sessions) pick anything up
     for t in result["tasks"]:  # every mention is classified + dispatched off the request thread
         threading.Thread(target=teamchat.run_chat_mention_in_background,
-                         args=(p.org_id, t["actor_id"], t["goal"]), daemon=True).start()
+                         args=(p.org_id, t["actor_id"], t["goal"], t.get("implicit", False)), daemon=True).start()
     return result

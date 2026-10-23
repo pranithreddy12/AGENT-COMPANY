@@ -681,7 +681,7 @@ V.teamchat = async () => {
     <div class="tc-col">
       <div class="tc-header">
         <span class="thav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></span>
-        <span><h3>Team chat</h3><p>@mention an agent to assign it real work</p></span>
+        <span><h3>Team chat</h3><p>Talk to the team - @mention an agent to direct it, or just say "sales ..." / "legal ..."; Cora picks up the rest</p></span>
       </div>
       <div class="tc-messages" id="chatlog">
         ${data.messages.length?data.messages.map(chatBubble).join('')

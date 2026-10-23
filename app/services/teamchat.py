@@ -76,7 +76,47 @@ def parse_mentions(text: str, agents: list[Actor]) -> list[Actor]:
     return out
 
 
-def classify_intent(db: Session, org_id: str, agent: Actor, text: str, transcript: str) -> str:
+# plain words people use for a department/role -> what to match it against
+_ROLE_WORDS = {
+    "sales": "Sales", "sale": "Sales", "marketing": "Marketing", "marketer": "Marketing",
+    "legal": "Legal", "lawyer": "Legal", "compliance": "Legal", "planning": "Planning", "planner": "Planning",
+    "client": "Client Management", "development": "Development", "developer": "Development",
+    "dev": "Development", "engineering": "Development", "engineer": "Development",
+}
+_WORD_RE = re.compile(r"[a-z]+")
+
+
+def infer_targets(db: Session, org_id: str, text: str, agents: list[Actor]) -> list[Actor]:
+    """Who should answer a message that @mentions nobody. Silence was the old behaviour: "sales agent
+    plan next move" got no reply at all, because only @handles counted. Resolve in order:
+      1. a department/role named in plain words ("sales agent ...", "ask legal") -> that department's
+         first agent (several departments named -> one agent each), or Rex for "research", Quinn for "qa";
+      2. otherwise the Lead - she's the one who takes "hey team" and "what should we do next".
+    Never returns empty (a chat that ignores you is a broken chat) unless the org has no agents."""
+    words = set(_WORD_RE.findall((text or "").lower()))
+    depts = {d.name: d.id for d in db.scalars(select(Department).where(Department.org_id == org_id))}
+    out: list[Actor] = []
+    seen: set[str] = set()
+
+    def add(a: Actor | None) -> None:
+        if a is not None and a.id not in seen:
+            seen.add(a.id)
+            out.append(a)
+
+    for w in sorted(words & set(_ROLE_WORDS), key=lambda x: (text or "").lower().find(x)):
+        dept_id = depts.get(_ROLE_WORDS[w])
+        add(next((a for a in agents if a.role == "member" and dept_id and a.department_id == dept_id), None))
+    if words & {"research", "researcher"}:
+        add(next((a for a in agents if a.role == "research"), None))
+    if words & {"qa", "critic", "quality"}:
+        add(next((a for a in agents if a.role == "critic"), None))
+    if not out:
+        add(next((a for a in agents if a.role == "lead"), None))
+    return out
+
+
+def classify_intent(db: Session, org_id: str, agent: Actor, text: str, transcript: str,
+                    implicit: bool = False) -> str:
     """Is this @mention asking for real work — a new goal/deliverable to actually produce or execute
     (or, for the Lead, decompose into a project) — or is it conversational: a question, a status
     check, a clarification, or an instruction that isn't itself a concrete deliverable? Not every
@@ -93,7 +133,9 @@ def classify_intent(db: Session, org_id: str, agent: Actor, text: str, transcrip
     than burning a Critic+Legal cycle (or a plan attempt) on a guess."""
     prof = db.get(AgentProfile, agent.agent_profile_id) if agent.agent_profile_id else None
     if prof is None or prof.provider == "echo":
-        return "task"
+        # Echo can't read intent. A message the human DIRECTED at an agent keeps the tested "task"
+        # contract; one nobody was addressed in ("hey team") is conversation, never a project plan.
+        return "chat" if implicit else "task"
     try:
         provider = runs.metered(db, org_id, agent, prof, "chat classification")
         system = (
@@ -113,13 +155,13 @@ def classify_intent(db: Session, org_id: str, agent: Actor, text: str, transcrip
 
 
 def _route_mention(db: Session, org_id: str, agent: Actor, goal: str, project: Project,
-                   transcript: str) -> dict:
+                   transcript: str, implicit: bool = False) -> dict:
     """Decide what one @mention means and set it up: classify it (a model call for a real provider),
     then either a conversational reply, the Lead drafting a real project, or a real Task for anyone
     else. Returns the dict the dispatcher acts on. Shared by the synchronous post() and the background
     worker so both make the exact same call."""
     base = {"actor_id": agent.id, "goal": goal, "agent": agent.name, "handle": handle(agent)}
-    if classify_intent(db, org_id, agent, goal, transcript) == "chat":
+    if classify_intent(db, org_id, agent, goal, transcript, implicit) == "chat":
         return {"kind": "chat", **base}
     if agent.role == "lead":
         return {"kind": "lead", **base}
@@ -156,25 +198,32 @@ def post(
         return {"error": "empty_message"}
     thread = team_thread(db, org_id)
     msg = communication.post_message(db, thread, sender_actor_id, text)
-    mentioned = parse_mentions(text, roster(db, org_id))
+    agents = roster(db, org_id)
+    mentioned = parse_mentions(text, agents)
+    implicit = False
+    if not mentioned and sender_actor_id is None:
+        implicit = True
+        # a HUMAN wrote to the team without an @handle: someone still answers (see infer_targets)
+        mentioned = infer_targets(db, org_id, text, agents)
     if not mentioned:
-        return {"message_id": msg.id, "tasks": []}  # plain chatter, no work assigned
+        return {"message_id": msg.id, "tasks": []}
 
     goal = (
         _MENTION_RE.sub("", text).strip() or text
     )  # the instruction minus the @handles
     if defer:
         return {"message_id": msg.id, "tasks": [
-            {"kind": "pending", "actor_id": a.id, "goal": goal, "agent": a.name, "handle": handle(a)}
+            {"kind": "pending", "actor_id": a.id, "goal": goal, "agent": a.name, "handle": handle(a),
+             "implicit": implicit}
             for a in mentioned
         ]}
     project = _chat_project(db, org_id)
     transcript = recent_transcript(db, org_id)
-    tasks = [_route_mention(db, org_id, a, goal, project, transcript) for a in mentioned]
+    tasks = [_route_mention(db, org_id, a, goal, project, transcript, implicit) for a in mentioned]
     return {"message_id": msg.id, "tasks": tasks}
 
 
-def run_chat_mention_in_background(org_id: str, actor_id: str, goal: str) -> None:
+def run_chat_mention_in_background(org_id: str, actor_id: str, goal: str, implicit: bool = False) -> None:
     """Classify one deferred @mention, then do whatever it turns out to mean. The slow model call that
     used to block the HTTP request lives here, on a worker thread."""
     db = SessionLocal()
@@ -182,7 +231,8 @@ def run_chat_mention_in_background(org_id: str, actor_id: str, goal: str) -> Non
         agent = db.get(Actor, actor_id)
         if agent is None:
             return
-        routed = _route_mention(db, org_id, agent, goal, _chat_project(db, org_id), recent_transcript(db, org_id))
+        routed = _route_mention(db, org_id, agent, goal, _chat_project(db, org_id),
+                                recent_transcript(db, org_id), implicit)
         db.commit()  # persist a newly created Task before the runner (its own session) loads it
     except Exception:
         db.rollback()
@@ -274,7 +324,9 @@ def run_chat_reply_in_background(org_id: str, actor_id: str, text: str) -> None:
             system = (
                 f"{persona}\n\n{company.company_context(db, org_id)}\n\nYou're replying in a team chat, not producing a deliverable. Reply "
                 "directly and briefly, in first person, grounded in the real conversation and your "
-                "own memory below — don't produce a formal document, just answer what was asked."
+                "own memory below — don't produce a formal document, just answer what was asked. "
+                "If the message is only a greeting, a fragment or unclear (\"hey team\", \"he\"), reply in "
+                "one or two sentences and ask what they would like done - do NOT invent a plan or task list."
             )
             user = (
                 (f"Your own memory from past work:\n{own_memory}\n\n" if own_memory else "")
