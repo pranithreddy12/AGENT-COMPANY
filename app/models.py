@@ -48,6 +48,9 @@ class Organization(Base):
     # the org's approved prices, free text ("Starter: $1,200/month"). The ONLY amounts a proposal may
     # contain - enforced by services/validate.py, never left to the model.
     price_list: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # real, citable results ("Dr Khan's clinic: +38 bookings in 60 days"). Agents may cite ONLY these;
+    # amounts inside them are allowed by the validator, any other invented figure is flagged.
+    proof_points: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 

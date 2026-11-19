@@ -58,7 +58,7 @@ def get_profile(db: Session = Depends(get_db), p: Principal = Depends(current_pr
     org = db.get(Organization, p.org_id)
     if org is None:
         raise HTTPException(status_code=404, detail="org not found")
-    return {"name": org.name, "profile": org.profile or "", "price_list": org.price_list or "",
+    return {"name": org.name, "profile": org.profile or "", "price_list": org.price_list or "", "proof_points": org.proof_points or "",
             "max_chars": company.PROFILE_MAX_CHARS}
 
 
@@ -78,5 +78,10 @@ def set_profile(body: ProfileIn, db: Session = Depends(get_db),
         if len(prices) > company.PROFILE_MAX_CHARS:
             raise HTTPException(status_code=422, detail="price list is too long")
         org.price_list = prices or None
+    if body.proof_points is not None:
+        proof = body.proof_points.strip()
+        if len(proof) > company.PROFILE_MAX_CHARS:
+            raise HTTPException(status_code=422, detail="proof points are too long")
+        org.proof_points = proof or None
     db.commit()
     return {"saved": True, "chars": len(text)}

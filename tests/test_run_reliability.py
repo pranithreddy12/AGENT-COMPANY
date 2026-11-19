@@ -192,10 +192,10 @@ def test_a_read_timeout_on_a_cloud_api_is_retried_once():
 
 
 def test_complete_with_retry_gives_up_after_the_attempt_budget():
-    prov = _Scripted([_status_error(503)] * 3)
+    prov = _Scripted([_status_error(503)] * 4)
     with pytest.raises(httpx.HTTPStatusError):
         llm.complete_with_retry(prov, base_delay=0, system="", messages=[], tools=[], max_tokens=5)
-    assert len(prov.calls) == 3
+    assert len(prov.calls) == 4
 
 
 def _quota_error():
@@ -211,3 +211,35 @@ def test_a_zero_quota_429_is_not_retried_and_is_explained_as_an_account_problem(
     assert len(prov.calls) == 1  # waiting cannot fix a limit of 0
     msg = llm.explain_error(ei.value)
     assert "no quota" in msg and "billing" in msg and "try again" not in msg
+
+
+def _limited(n, retry_after=None):
+    req = httpx.Request("POST", "http://x")
+    h = {"x-ratelimit-limit-req-minute": str(n)}
+    if retry_after:
+        h["retry-after"] = retry_after
+    return httpx.HTTPStatusError("429", request=req, response=httpx.Response(429, request=req, headers=h))
+
+
+def test_a_429_waits_for_the_published_window_not_a_few_seconds(monkeypatch):
+    import time as _t
+
+    slept = []
+    monkeypatch.setattr(_t, "sleep", lambda s: slept.append(s))
+    prov = _Scripted([_limited(2), _text("ok")])
+    assert llm.complete_with_retry(prov, system="", messages=[], tools=[], max_tokens=5).text == "ok"
+    assert slept == [31.0]  # 60 / 2 requests-per-minute + 1s margin
+
+
+def test_retry_after_header_wins_and_is_capped(monkeypatch):
+    import time as _t
+
+    slept = []
+    monkeypatch.setattr(_t, "sleep", lambda s: slept.append(s))
+    llm.complete_with_retry(_Scripted([_limited(2, "7"), _text()]), system="", messages=[], tools=[], max_tokens=5)
+    llm.complete_with_retry(_Scripted([_limited(2, "900"), _text()]), system="", messages=[], tools=[], max_tokens=5)
+    assert slept == [7.0, 45.0]
+
+
+def test_a_low_per_minute_limit_is_explained_with_the_number():
+    assert "only 2 request(s) per minute" in llm.explain_error(_limited(2))

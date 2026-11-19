@@ -32,6 +32,8 @@ except Exception:
 
 PROFILE = ("Acme Dental Marketing is a 5-person agency in Dubai. We run Instagram-led lead generation for "
            "private dental clinics. Tone: warm, direct, plain English, no hype.")
+PROOF = ("Dr Khan's clinic: 38 extra bookings in 60 days\n"
+         "Smile Studio: cost per lead down from $42 to $19")
 PRICES = "Starter: $1,200/month\nGrowth: $2,500/month\nOne-off Instagram audit: $900"
 
 # (agent name, task) - realistic day-to-day agency work, including ones that tempt placeholders,
@@ -56,7 +58,7 @@ def main() -> None:
     db = sessionmaker(bind=engine, expire_on_commit=False)()
     org_id = create_org(OrgCreate(name="Acme Dental Marketing", ceo_email="e@a.com", ceo_password="pw"), db).org_id
     org = db.get(Organization, org_id)
-    org.profile, org.price_list = PROFILE, PRICES
+    org.profile, org.price_list, org.proof_points = PROFILE, PRICES, PROOF
     llm.configure_org_llm(db, org_id, provider, model, None)
     db.commit()
 

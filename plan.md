@@ -447,3 +447,8 @@ The Mistral key works but its plan gives `mistral-small-latest` a limit of 0 req
 | autofix `[X]` -> `{{x}}` + JSON-mode critic + truncated-JSON salvage + cloud timeout retry | **83%** | **83%** | mechanical rules enforced by code; critic no longer dies on long reasons |
 Remaining miss: outreach copy that invents ROI dollar figures ($3,200 / $8,000 / $15,000) - a true catch; the fix is a "claims" input (real case-study numbers) rather than a looser validator.
 Lesson recorded: *measure the validator on real model output before trusting it* - v1 looked right and was wrong in 3 ways.
+
+### 2026-11-19 follow-up
+- **Proof points** (`Organization.proof_points`, Governance -> Company profile): agents may cite only these; figures inside them pass the validator, any other invented figure is flagged. Eval: outreach now cites the real results but still invents a "$12,000+/month" loss claim - correctly caught (needs-human), the model needs a better prompt or a bigger model.
+- **Validator bug found by that work:** `$18,000 more` was parsed as $18 billion (the "m" of "more" read as a million suffix). Suffix must now end the word.
+- **Mistral free-tier limits move:** the same key showed 0, then 188, then 2 requests/min within a month. `complete_with_retry` now waits the published window (Retry-After, else 60/limit + 1s, cap 45s, 4 attempts) and the error states the limit. At 2 req/min a task takes ~1-3 minutes - a paid plan removes this; it is the main thing keeping "fast" out of reach on the free key.

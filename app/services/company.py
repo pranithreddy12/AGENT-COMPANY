@@ -26,6 +26,13 @@ def company_context(db: Session, org_id: str) -> str:
         lines.append("Approved prices (use ONLY these amounts, exactly as written):\n" + prices[:PROFILE_MAX_CHARS])
     else:
         lines.append("No price list is configured: write [price to confirm] wherever a price would go.")
+    proof = (org.proof_points or "").strip()
+    if proof:
+        lines.append("Real results you may cite (cite ONLY these; never invent a statistic, client or "
+                     "outcome):\n" + proof[:PROFILE_MAX_CHARS])
+    else:
+        lines.append("No proof points are configured: do not claim specific results, client names or "
+                     "statistics - describe the approach instead.")
     lines.append(
         "Use these facts directly - write the real company name, never [Company Name] or similar. "
         "Do not invent facts about the company that are not stated here. "

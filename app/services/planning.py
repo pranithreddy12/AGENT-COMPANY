@@ -348,7 +348,9 @@ def _draft_issues(db: Session, org_id: str, actor: Actor, content: str,
         return []
     org = db.get(Organization, org_id)
     dept = db.get(Department, actor.department_id) if actor.department_id else None
-    prices = org.price_list if org and _price_sensitive(dept.name if dept else None, goal) else None
+    # allowed amounts = our prices + the figures inside our real proof points (so a cited result passes)
+    prices = (f"{org.price_list or ''}\n{org.proof_points or ''}"
+              if org and _price_sensitive(dept.name if dept else None, goal) else None)
     return validate.check(content, price_list=prices)
 
 

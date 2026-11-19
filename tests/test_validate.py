@@ -385,3 +385,29 @@ def test_a_truncated_passing_reply_passes_and_garbage_still_fails_closed():
     assert review.parse_critic_verdict('{"passed": true, "reas').passed is True
     v = review.parse_critic_verdict("Sure! I think it looks great.")
     assert v.passed is False and v.error  # nothing recognisable -> never a silent pass
+
+
+# ---------- proof points: real results are citable, invented ones are not ----------
+
+def test_proof_points_reach_agents_and_their_figures_are_allowed_but_others_flagged(db):
+    from app.services import company
+
+    org_id = _org(db)
+    ctx0 = company.company_context(db, org_id)
+    assert "do not claim specific results" in ctx0  # no proof configured -> told not to invent any
+
+    org = db.get(Organization, org_id)
+    org.price_list, org.proof_points = PRICES, "Dr Khan's clinic: $18,000 extra revenue in 60 days"
+    sam = db.scalars(select(Actor).where(Actor.org_id == org_id, Actor.name == "Sam Sales Agent")).first()
+    db.get(AgentProfile, sam.agent_profile_id).provider = "mistral"
+    db.commit()
+    assert "Dr Khan's clinic" in company.company_context(db, org_id)
+
+    cited = planning._draft_issues(db, org_id, sam, "Dr Khan's clinic made $18,000 more in 60 days.", "outreach")
+    invented = planning._draft_issues(db, org_id, sam, "We recovered $3,200 for a clinic.", "outreach")
+    assert cited == [] and [i.kind for i in invented] == ["price"]
+
+
+def test_a_word_starting_with_m_or_k_is_not_a_million_or_thousand_suffix():
+    assert validate.amounts_in("made $18,000 more in 60 days") == [18000.0]
+    assert validate.amounts_in("$2 million, $3.5m, $1.2k/month, $5 kids") == [2.0, 3500000.0, 1200.0, 5.0]

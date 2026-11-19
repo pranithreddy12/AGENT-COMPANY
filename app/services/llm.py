@@ -656,13 +656,38 @@ def _is_transient(e: Exception) -> bool:
     return getattr(e, "status_code", None) in _RETRY_STATUS  # anthropic SDK errors carry status_code
 
 
+def _window_delay(e: Exception) -> float | None:
+    """How long a 429 says to wait, in seconds, from what the provider published: Retry-After, else one
+    full per-minute window (60 / requests-per-minute). Observed live: a free key at 2 req/min - the old
+    2s/4s backoff retried inside the same window and failed every time."""
+    import httpx
+
+    if not isinstance(e, httpx.HTTPStatusError) or e.response.status_code != 429:
+        return None
+    h = e.response.headers
+    try:
+        if h.get("retry-after"):
+            return min(float(h["retry-after"]), 45.0)
+    except ValueError:
+        pass
+    for k, v in h.items():
+        if k.lower().startswith("x-ratelimit-limit-req"):
+            try:
+                n = int(v)
+            except ValueError:
+                continue
+            if n > 0:
+                return min(60.0 / n + 1.0, 45.0)
+    return None
+
+
 def _is_local(provider) -> bool:
     """Plain Ollama (a model on this machine): a read timeout there means "still thinking"."""
     inner = getattr(provider, "_p", provider)  # unwrap runs.MeteredProvider
     return type(inner).__name__ == "OllamaProvider"
 
 
-def complete_with_retry(provider, *, attempts: int = 3, base_delay: float = 2.0, **kwargs) -> Completion:
+def complete_with_retry(provider, *, attempts: int = 4, base_delay: float = 2.0, **kwargs) -> Completion:
     """provider.complete() with a bounded retry on transient failures. Cloud providers 429/503
     routinely under load; without this one blip failed a whole task (and its Critic/revise cycle)
     and sent it to a human for something that a retry two seconds later would have fixed."""
@@ -679,7 +704,9 @@ def complete_with_retry(provider, *, attempts: int = 3, base_delay: float = 2.0,
             cloud_stall = isinstance(e, httpx.ReadTimeout) and not _is_local(provider) and i == 0
             if i == attempts - 1 or not (_is_transient(e) or cloud_stall):
                 raise
-            time.sleep(min(base_delay * (2**i), 20))
+            wait = _window_delay(e)
+            # base_delay scales the wait so tests (base_delay=0) never sleep; 2.0 is the production default
+            time.sleep((wait * base_delay / 2.0) if wait is not None else min(base_delay * (2**i), 20))
 
 
 def explain_error(e: Exception) -> str:
@@ -692,6 +719,10 @@ def explain_error(e: Exception) -> str:
         if code == 429 and _no_quota(e.response):
             return ("the API key has no quota (the provider reports a limit of 0 requests/minute) - "
                     "check the plan / billing / credit for this key, or switch provider in Governance -> Model")
+        lim = next((v for k, v in e.response.headers.items() if k.lower().startswith("x-ratelimit-limit-req")), None)
+        if code == 429 and lim and str(lim).isdigit():
+            return (f"rate limited: this API key allows only {lim} request(s) per minute right now - "
+                    "each task needs 2-3 calls, so expect about a minute per task; a paid plan removes this")
         hint = {
             400: "the request was rejected — check the model name",
             401: "the API key was rejected — check it in Governance -> Model",

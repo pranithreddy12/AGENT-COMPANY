@@ -16,8 +16,9 @@ _FILLER_WORDS = re.compile(r"\b(lorem ipsum|insert (?:here|name|date|company)|yo
 
 # currency amounts: $1,200  $1.2k  USD 500  1200 USD  AED 3,000  EUR / GBP / INR variants
 _MONEY = re.compile(
-    r"(?:(?:USD|AED|EUR|GBP|INR|\$|€|£|₹)\s?(\d[\d,]*(?:\.\d+)?)\s?([kKmM])?)"
-    r"|(?:(\d[\d,]*(?:\.\d+)?)\s?([kKmM])?\s?(?:USD|AED|EUR|GBP|INR)\b)"
+    # the k/m suffix must END the word: "$18,000 more" is not "$18,000 million" (observed live)
+    r"(?:(?:USD|AED|EUR|GBP|INR|\$|€|£|₹)\s?(\d[\d,]*(?:\.\d+)?)\s?([kKmM])?(?![A-Za-z]))"
+    r"|(?:(\d[\d,]*(?:\.\d+)?)\s?([kKmM])?(?![A-Za-z])\s?(?:USD|AED|EUR|GBP|INR))"
 )
 _YEAR = re.compile(r"\b(19|20)\d{2}\b")
 

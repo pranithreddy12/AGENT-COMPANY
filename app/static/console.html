@@ -1108,6 +1108,9 @@ async function profilePanel(){
     <label style="display:block;margin-top:16px">Price list — the only amounts proposals may contain</label>
     <textarea id="co-prices" rows="4" maxlength="${c.max_chars}" style="width:100%;resize:vertical"
       placeholder="Starter: $1,200/month&#10;Growth: $2,500/month&#10;One-off audit: $900">${esc(c.price_list)}</textarea>
+    <label style="display:block;margin-top:16px">Proof points — real results agents may cite (anything else they invent gets flagged)</label>
+    <textarea id="co-proof" rows="4" maxlength="${c.max_chars}" style="width:100%;resize:vertical"
+      placeholder="Dr Khan's clinic: 38 extra bookings in 60 days&#10;Smile Studio: cost per lead down from $42 to $19">${esc(c.proof_points)}</textarea>
     <div class="row" style="margin-top:12px"><button class="btn btn-primary" onclick="saveProfile()">Save profile</button></div>
     <div class="faint" id="co-msg" style="margin-top:10px"></div></div>`;
 }
@@ -1116,7 +1119,8 @@ async function saveProfile(){
   msg.textContent = 'Saving…';
   try{
     await api('POST','/settings/profile',{profile: document.getElementById('co-profile').value,
-                                          price_list: document.getElementById('co-prices').value});
+                                          price_list: document.getElementById('co-prices').value,
+                                          proof_points: document.getElementById('co-proof').value});
     toast('Company profile saved — agents will use it on their next task','ok');
     msg.textContent = '';
   }catch(e){ msg.textContent = 'Error '+(e.status||'')+': '+(e.detail||''); }

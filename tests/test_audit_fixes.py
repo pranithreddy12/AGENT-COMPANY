@@ -419,7 +419,7 @@ def test_company_context_works_without_a_profile_and_bounds_a_huge_one(db):
     assert "Acme" in company.company_context(db, org_id)  # the name alone removes [Company Name]
     db.get(Organization, org_id).profile = "x" * 50_000
     db.commit()
-    assert len(company.company_context(db, org_id)) < company.PROFILE_MAX_CHARS + 500  # bounded in prompts
+    assert len(company.company_context(db, org_id)) < company.PROFILE_MAX_CHARS + 1500  # bounded in prompts
     assert company.company_context(db, "no-such-org") == ""
 
 
