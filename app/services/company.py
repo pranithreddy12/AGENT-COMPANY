@@ -36,6 +36,9 @@ def company_context(db: Session, org_id: str) -> str:
     lines.append(
         "Use these facts directly - write the real company name, never [Company Name] or similar. "
         "Do not invent facts about the company that are not stated here. "
+        "Never state a number about the reader or their business (their revenue, losses, patient counts, "
+        "percentages, time saved) - you do not know it. Use only prices and results given above; otherwise "
+        "ask a question or describe the approach without figures. "
         "If some other detail is genuinely not given (e.g. which client a generic template is for), write it as a "
         "double-brace merge field like {{client_name}} - never in square brackets, and never invent it."
     )
